@@ -1,64 +1,45 @@
 #!/usr/bin/env bun
 import path from "path";
-import { Glob } from "bun";
+import { Glob, type BunFile } from "bun";
 
-// --- STRICT TEXT EXTENSIONS ALLOWLIST ---
-// NO .env files allowed. Prevents leaking AWS/OpenAI keys.
-const TEXT_EXTENSIONS = new Set([
-    // Web & JS Ecosystem
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".vue",
-    ".svelte",
-    ".astro",
-    ".cjs",
-    ".mjs",
-    // Styles & Assets
-    ".html",
-    ".css",
-    ".scss",
-    ".sass",
-    ".less",
-    ".svg",
-    // Backend & Systems
-    ".py",
-    ".go",
-    ".rb",
-    ".php",
-    ".java",
-    ".c",
-    ".cpp",
-    ".h",
-    ".rs",
-    ".swift",
-    ".kt",
-    ".sh",
-    // Config, Data & Docs
-    ".json",
-    ".md",
-    ".mdx",
-    ".txt",
-    ".yml",
-    ".yaml",
-    ".xml",
-    ".toml",
-    ".ini",
-    ".prisma",
-    ".graphql",
-    ".sql",
-]);
+// --- FILE TYPE CHECKER ---
+async function checkIsTextFile(
+    file: BunFile,
+    basename: string,
+): Promise<boolean> {
+    // NO .env files allowed. Prevents leaking AWS/OpenAI keys.
+    if (basename.startsWith(".env")) return false;
 
-// --- EXPLICIT SAFE FILENAMES ---
-// Covers common extensionless files that are safe to read as text
-const TEXT_FILENAMES = new Set([
-    "Dockerfile",
-    "Makefile",
-    "Gemfile",
-    "package.json",
-    "docker-compose.yml",
-]);
+    const type = file.type;
+
+    // Bun's mime checker identifies these as text/code
+    if (
+        type.startsWith("text/") ||
+        type === "application/json" ||
+        type === "application/javascript" ||
+        type === "application/typescript" ||
+        type === "application/xml" ||
+        type === "application/graphql" ||
+        type === "application/x-sh" ||
+        type === "application/x-httpd-php"
+    ) {
+        return true;
+    }
+
+    // Fallback for extensionless files (like `context`, `Dockerfile`)
+    if (type === "application/octet-stream") {
+        try {
+            const buffer = new Uint8Array(
+                await file.slice(0, 1024).arrayBuffer(),
+            );
+            return buffer.length === 0 || !buffer.includes(0);
+        } catch {
+            return false;
+        }
+    }
+
+    return false;
+}
 
 // --- PATH NORMALIZER ---
 function normalizePath(p: string) {
@@ -209,7 +190,8 @@ async function assembleLlmContext(
         if (entrypoints.length > 0) {
             const result = await Bun.build({
                 entrypoints: entrypoints,
-                target: "browser",
+                target: "bun",
+                external: ["*"],
                 metafile: true,
                 plugins: [viteResolverPlugin],
             });
@@ -252,12 +234,10 @@ async function assembleLlmContext(
         for (const filePath of sortedInputs) {
             const file = Bun.file(filePath);
             if (await file.exists()) {
-                const ext = path.extname(filePath).toLowerCase();
                 const basename = path.basename(filePath);
 
-                // Safe check: Is it in our extension allowlist OR our filename allowlist?
-                const isTextFile =
-                    TEXT_EXTENSIONS.has(ext) || TEXT_FILENAMES.has(basename);
+                // Safe check: Is it text based on mime-type and contents?
+                const isTextFile = await checkIsTextFile(file, basename);
 
                 mergedContent += `// ==========================================\n`;
                 mergedContent += `// File: ${filePath}\n`;
