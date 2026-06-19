@@ -1,0 +1,339 @@
+#!/usr/bin/env bun
+import path from "path";
+import { Glob } from "bun";
+
+// --- STRICT TEXT EXTENSIONS ALLOWLIST ---
+// NO .env files allowed. Prevents leaking AWS/OpenAI keys.
+const TEXT_EXTENSIONS = new Set([
+    // Web & JS Ecosystem
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".vue",
+    ".svelte",
+    ".astro",
+    ".cjs",
+    ".mjs",
+    // Styles & Assets
+    ".html",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".svg",
+    // Backend & Systems
+    ".py",
+    ".go",
+    ".rb",
+    ".php",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".rs",
+    ".swift",
+    ".kt",
+    ".sh",
+    // Config, Data & Docs
+    ".json",
+    ".md",
+    ".mdx",
+    ".txt",
+    ".yml",
+    ".yaml",
+    ".xml",
+    ".toml",
+    ".ini",
+    ".prisma",
+    ".graphql",
+    ".sql",
+]);
+
+// --- EXPLICIT SAFE FILENAMES ---
+// Covers common extensionless files that are safe to read as text
+const TEXT_FILENAMES = new Set([
+    "Dockerfile",
+    "Makefile",
+    "Gemfile",
+    "package.json",
+    "docker-compose.yml",
+]);
+
+// --- PATH NORMALIZER ---
+function normalizePath(p: string) {
+    const absolute = path.resolve(p);
+    let rel = path.relative(process.cwd(), absolute);
+    return rel.replace(/\\/g, "/");
+}
+
+// --- VITE PATH RESOLVER PLUGIN ---
+const viteResolverPlugin = {
+    name: "vite-resolver",
+    setup(build: any) {
+        build.onResolve({ filter: /^\/[^/]/ }, (args: any) => {
+            return { path: path.join(process.cwd(), args.path) };
+        });
+    },
+};
+
+// --- GITIGNORE PARSER ---
+async function loadGitignore(cwd: string): Promise<string[]> {
+    const file = Bun.file(path.join(cwd, ".gitignore"));
+    if (!(await file.exists())) return [];
+
+    const content = await file.text();
+    return content
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#")) // Ignore empty lines and comments
+        .map((line) => (line.endsWith("/") ? line.slice(0, -1) : line)); // Strip trailing slashes
+}
+
+// --- EXCLUSION CHECKER ---
+function isExcluded(filePath: string, excludes: string[]) {
+    // Hardcoded safety nets
+    if (filePath.includes("node_modules/") || filePath.includes(".git/"))
+        return true;
+
+    for (const pattern of excludes) {
+        if (pattern.includes("*")) {
+            const glob = new Glob(pattern);
+            if (glob.match(filePath)) return true;
+        } else {
+            const normPattern = normalizePath(pattern);
+            // Matches exact file, or a directory match anywhere in the path
+            if (
+                filePath === normPattern ||
+                filePath.startsWith(normPattern + "/") ||
+                filePath.includes("/" + normPattern + "/")
+            ) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// --- CSS @IMPORT CRAWLER ---
+async function crawlCssImports(
+    filePath: string,
+    excludes: string[],
+    visited = new Set<string>(),
+) {
+    const normalizedFilePath = normalizePath(filePath);
+    if (visited.has(normalizedFilePath)) return visited;
+    visited.add(normalizedFilePath);
+
+    const file = Bun.file(normalizedFilePath);
+    if (!(await file.exists())) return visited;
+
+    const content = await file.text();
+    const importRegex = /@import\s+(?:url\()?['"]([^'"]+)['"]\)?/g;
+    let match;
+
+    while ((match = importRegex.exec(content)) !== null) {
+        let importPath = match[1];
+
+        if (importPath.startsWith("/")) {
+            importPath = path.join(process.cwd(), importPath);
+        } else {
+            importPath = path.resolve(
+                path.dirname(normalizedFilePath),
+                importPath,
+            );
+        }
+
+        const normImportPath = normalizePath(importPath);
+        if (!isExcluded(normImportPath, excludes)) {
+            await crawlCssImports(normImportPath, excludes, visited);
+        }
+    }
+
+    return visited;
+}
+
+import { statSync } from "fs";
+
+// --- MAIN ASSEMBLER ---
+async function assembleLlmContext(
+    includes: string[],
+    baseExcludes: string[],
+    outputFile: string,
+) {
+    try {
+        let inputs = new Set<string>();
+
+        // 0. Automatically merge .gitignore rules with user-provided excludes
+        const gitignoreRules = await loadGitignore(process.cwd());
+        const excludes = [...baseExcludes, ...gitignoreRules];
+
+        // 1. Expand input globs and add explicit files
+        for (const pattern of includes) {
+            if (pattern.includes("*")) {
+                const glob = new Glob(pattern);
+                for (const file of glob.scanSync(".")) {
+                    inputs.add(normalizePath(file));
+                }
+            } else {
+                try {
+                    const stat = statSync(pattern);
+                    if (stat.isDirectory()) {
+                        const glob = new Glob("**/*");
+                        for (const file of glob.scanSync(pattern)) {
+                            inputs.add(normalizePath(path.join(pattern, file)));
+                        }
+                    } else {
+                        inputs.add(normalizePath(pattern));
+                    }
+                } catch {
+                    inputs.add(normalizePath(pattern));
+                }
+            }
+        }
+
+        // 2. Initial scrub
+        for (const file of Array.from(inputs)) {
+            if (isExcluded(file, excludes)) {
+                inputs.delete(file);
+            }
+        }
+
+        // 3. Identify entrypoints safe for Bun.build mapping
+        const buildableExts = new Set([".js", ".jsx", ".ts", ".tsx", ".html"]);
+        const entrypoints = Array.from(inputs).filter((f) =>
+            buildableExts.has(path.extname(f).toLowerCase()),
+        );
+
+        // 4. Let Bun trace the AST dependency tree for code files
+        if (entrypoints.length > 0) {
+            const result = await Bun.build({
+                entrypoints: entrypoints,
+                target: "browser",
+                metafile: true,
+                plugins: [viteResolverPlugin],
+            });
+
+            if (result.success && result.metafile) {
+                const metaStr = result.metafile;
+                const meta =
+                    typeof metaStr === "string" ? JSON.parse(metaStr) : metaStr;
+
+                Object.keys(meta.inputs || {}).forEach((f) => {
+                    const normPath = normalizePath(f);
+                    if (!isExcluded(normPath, excludes)) inputs.add(normPath);
+                });
+            } else if (!result.success) {
+                console.warn(
+                    "⚠️ Bun had issues tracing some AST dependencies:",
+                    result.logs,
+                );
+            }
+        }
+
+        // 5. CSS Scan
+        const initialFiles = Array.from(inputs);
+        for (const file of initialFiles) {
+            if (file.endsWith(".css")) {
+                const cssDeps = await crawlCssImports(file, excludes);
+                cssDeps.forEach((dep) => {
+                    if (!isExcluded(dep, excludes)) inputs.add(dep);
+                });
+            }
+        }
+
+        let mergedContent = `// Context Assembled via AST/Glob Trace\n\n`;
+        let processedCount = 0;
+
+        // 6. Sort inputs alphabetically for deterministic output
+        const sortedInputs = Array.from(inputs).sort();
+
+        // 7. Read and append files safely
+        for (const filePath of sortedInputs) {
+            const file = Bun.file(filePath);
+            if (await file.exists()) {
+                const ext = path.extname(filePath).toLowerCase();
+                const basename = path.basename(filePath);
+
+                // Safe check: Is it in our extension allowlist OR our filename allowlist?
+                const isTextFile =
+                    TEXT_EXTENSIONS.has(ext) || TEXT_FILENAMES.has(basename);
+
+                mergedContent += `// ==========================================\n`;
+                mergedContent += `// File: ${filePath}\n`;
+                mergedContent += `// ==========================================\n\n`;
+
+                if (isTextFile) {
+                    const content = await file.text();
+                    mergedContent += `${content}\n\n`;
+                } else {
+                    mergedContent += `// [BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]\n\n`;
+                }
+                processedCount++;
+            }
+        }
+
+        // 8. Compute SHA
+        const hasher = new Bun.CryptoHasher("sha256");
+        hasher.update(mergedContent);
+        const shortSha = hasher.digest("hex").substring(0, 8);
+
+        // 9. Inject SHA into filename
+        const extIndex = outputFile.lastIndexOf(".");
+        const finalOutputFile =
+            extIndex !== -1
+                ? `${outputFile.substring(0, extIndex)}-${shortSha}${outputFile.substring(extIndex)}`
+                : `${outputFile}-${shortSha}`;
+
+        // 10. Write out
+        await Bun.write(finalOutputFile, mergedContent);
+        console.log(
+            `✅ Successfully assembled ${processedCount} files into ${finalOutputFile}`,
+        );
+    } catch (error) {
+        console.error("❌ Error generating context:", error);
+    }
+}
+
+// --- CLI ARGUMENT PARSER ---
+const args = Bun.argv.slice(2);
+
+if (args.length === 0) {
+    console.log(
+        "Usage: ./context.ts <includes...> [--exclude <excludes...>] [--out <output-file>]",
+    );
+    process.exit(1);
+}
+
+const includes: string[] = [];
+const excludes: string[] = [];
+let outputFile = "llm-context.txt";
+let currentMode: "include" | "exclude" | "out" = "include";
+
+for (const arg of args) {
+    if (arg === "--exclude") {
+        currentMode = "exclude";
+        continue;
+    }
+    if (arg === "--out") {
+        currentMode = "out";
+        continue;
+    }
+
+    if (currentMode === "include") {
+        includes.push(arg);
+    } else if (currentMode === "exclude") {
+        excludes.push(arg);
+    } else if (currentMode === "out") {
+        outputFile = arg;
+        currentMode = "include";
+    }
+}
+
+if (includes.length === 0) {
+    console.error("❌ You must specify at least one entry file or pattern.");
+    process.exit(1);
+}
+
+// Execute
+assembleLlmContext(includes, excludes, outputFile);
