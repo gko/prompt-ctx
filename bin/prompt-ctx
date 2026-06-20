@@ -254,23 +254,25 @@ const gitignoreCache = new Map<string, GitignoreRule[]>();
 function getGitignoreRulesForFile(filePath: string): GitignoreRule[] {
     const rules: GitignoreRule[] = [];
     let currentDir = path.dirname(path.resolve(filePath));
-    const rootDir = process.cwd().toLowerCase(); // normalized root
+    const rootDir = process.cwd().toLowerCase();
 
     while (currentDir.toLowerCase().startsWith(rootDir)) {
-        if (!gitignoreCache.has(currentDir)) {
+        const cacheKey = currentDir.toLowerCase();
+
+        if (!gitignoreCache.has(cacheKey)) {
             const gitignorePath = path.join(currentDir, ".gitignore");
             if (existsSync(gitignorePath)) {
                 const content = readFileSync(gitignorePath, "utf8");
                 gitignoreCache.set(
-                    currentDir,
+                    cacheKey,
                     parseGitignore(content, currentDir),
                 );
             } else {
-                gitignoreCache.set(currentDir, []);
+                gitignoreCache.set(cacheKey, []);
             }
         }
 
-        rules.push(...gitignoreCache.get(currentDir)!);
+        rules.push(...gitignoreCache.get(cacheKey)!);
 
         if (currentDir.toLowerCase() === rootDir) break;
         currentDir = path.dirname(currentDir);
@@ -445,16 +447,18 @@ async function assembleLlmContext(
             return pattern;
         });
 
-        // Ouroboros fix: prevent prompt-ctx from ingesting its own previous outputs
-        // Level 5000: explicitly anchor these to the root so we don't nuke "docs/llm-context.txt"
-        const outBase = path.basename(outputFile, path.extname(outputFile));
+        // Normalize output path for reliable self-exclusion
+        const normOutPath = normalizePath(outputFile);
+        const outBase = path.basename(normOutPath, path.extname(normOutPath));
+        const outDir = path.dirname(normOutPath);
+
+        // Build safe self-excludes that work even when output is in a subdirectory
         const selfExcludes = [
-            `/${outputFile}`,
-            `/${outBase}*${path.extname(outputFile)}`,
-            `/${outBase}*.txt`,
+            `/${normOutPath}`,
+            `/${outDir === "." ? "" : outDir + "/"}${outBase}*${path.extname(normOutPath)}`,
+            `/${outDir === "." ? "" : outDir + "/"}${outBase}*.txt`,
         ];
 
-        // Combine CLI and self excludes (gitignore is resolved dynamically per-file inside isExcluded)
         const globalExcludes = [...normalizedBaseExcludes, ...selfExcludes];
 
         // 1. Expand input globs and add explicit files
@@ -669,7 +673,7 @@ The Bun-native, AST-aware context packer.
 
 Options:
   --out <file>        Output filename (default: llm-context.txt)
-                      The final file will include an 8-char SHA (e.g. context-a1b2c3d4.txt)
+                      The final file will include an 8-char SHA
   --exclude <globs>   Additional patterns to ignore (merged with .gitignore)
   --help, -h          Show this help message
   --version, -v       Show version
@@ -693,13 +697,19 @@ let outputFile = "llm-context.txt";
 
 for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+
     if (arg === "--exclude") {
-        while (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        while (
+            i + 1 < args.length &&
+            !args[i + 1].startsWith("-") &&
+            !existsSync(args[i + 1])
+        ) {
             excludes.push(args[i + 1]);
             i++;
         }
         continue;
     }
+
     if (arg === "--out") {
         if (i + 1 < args.length) {
             outputFile = args[i + 1];

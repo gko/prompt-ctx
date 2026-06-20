@@ -704,3 +704,57 @@ test("Level 6000: Monorepo deep exclusions strictly override higher whitelists",
     // The deep exclusion must win over the root whitelist
     expect(content).not.toContain("File: packages/api/dist/bundle.js");
 });
+
+// ==========================================
+// NEW TESTS FOR RECENT FIXES
+// ==========================================
+
+test("CLI --exclude does not swallow positional arguments", async () => {
+    await writeFile(path.join(FIXTURES_DIR, "main.ts"), "console.log('main');");
+    await writeFile(path.join(FIXTURES_DIR, "test.spec.ts"), "console.log('test');");
+
+    const { exitCode } = await runCli([
+        "--exclude",
+        "*.spec.ts",
+        "main.ts",           // positional argument after --exclude
+        "--out",
+        "output.txt"
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("File: main.ts");
+    expect(content).not.toContain("File: test.spec.ts");
+});
+
+test("Self-exclusion works when output is in a subdirectory", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "dist"), { recursive: true });
+    await writeFile(path.join(FIXTURES_DIR, "index.ts"), "console.log('hello');");
+
+    const { exitCode } = await runCli([
+        "index.ts",
+        "--out",
+        "dist/llm-context.txt"
+    ]);
+    expect(exitCode).toBe(0);
+
+    // The tool should not crash and should produce the file
+    const files = await readdir(path.join(FIXTURES_DIR, "dist"));
+    const outputFiles = files.filter(f => f.startsWith("llm-context-") && f.endsWith(".txt"));
+    expect(outputFiles.length).toBe(1);
+});
+
+test("gitignore rules work correctly with folder/* pattern", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src"), { recursive: true });
+    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "console.log('main');");
+    await writeFile(path.join(FIXTURES_DIR, "src/test.ts"), "console.log('test');");
+
+    await writeFile(path.join(FIXTURES_DIR, ".gitignore"), "src/*\n");
+
+    const { exitCode } = await runCli(["src", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).not.toContain("File: src/main.ts");
+    expect(content).not.toContain("File: src/test.ts");
+});
