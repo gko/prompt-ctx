@@ -20,7 +20,9 @@ async function runCli(args: string[], cwd: string = FIXTURES_DIR) {
 
 async function getOutputContent() {
     const files = await readdir(FIXTURES_DIR);
-    const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
+    const outputFiles = files.filter(
+        (f) => f.startsWith("output-") && f.endsWith(".txt"),
+    );
     if (outputFiles.length === 0) return null;
     return await readFile(path.join(FIXTURES_DIR, outputFiles[0]), "utf-8");
 }
@@ -46,7 +48,9 @@ test("adds files and checks the hash in the file name", async () => {
     expect(exitCode).toBe(0);
 
     const files = await readdir(FIXTURES_DIR);
-    const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
+    const outputFiles = files.filter(
+        (f) => f.startsWith("output-") && f.endsWith(".txt"),
+    );
     expect(outputFiles.length).toBe(1);
 
     const outputFile = outputFiles[0];
@@ -60,10 +64,18 @@ test("adds files and checks the hash in the file name", async () => {
 
 test("adds files and ignores files that are in .gitignore", async () => {
     await writeFile(path.join(FIXTURES_DIR, "a.js"), "console.log('a');");
-    await writeFile(path.join(FIXTURES_DIR, "secret.js"), "console.log('secret');");
+    await writeFile(
+        path.join(FIXTURES_DIR, "secret.js"),
+        "console.log('secret');",
+    );
     await writeFile(path.join(FIXTURES_DIR, ".gitignore"), "secret.js\n");
 
-    const { exitCode } = await runCli(["a.js", "secret.js", "--out", "output.txt"]);
+    const { exitCode } = await runCli([
+        "a.js",
+        "secret.js",
+        "--out",
+        "output.txt",
+    ]);
     expect(exitCode).toBe(0);
 
     const content = await getOutputContent();
@@ -75,10 +87,23 @@ test("adds folders and ignores some file patterns explicitly", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
     await mkdir(path.join(FIXTURES_DIR, "tests"));
 
-    await writeFile(path.join(FIXTURES_DIR, "src/main.js"), "console.log('main');");
-    await writeFile(path.join(FIXTURES_DIR, "tests/main.test.js"), "console.log('test');");
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/main.js"),
+        "console.log('main');",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "tests/main.test.js"),
+        "console.log('test');",
+    );
 
-    const { exitCode } = await runCli(["src", "tests", "--exclude", "tests/*", "--out", "output.txt"]);
+    const { exitCode } = await runCli([
+        "src",
+        "tests",
+        "--exclude",
+        "tests/*",
+        "--out",
+        "output.txt",
+    ]);
     expect(exitCode).toBe(0);
 
     const content = await getOutputContent();
@@ -88,9 +113,18 @@ test("adds folders and ignores some file patterns explicitly", async () => {
 
 test("AST dependency tracing: automatically pulls in imported files", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
-    await writeFile(path.join(FIXTURES_DIR, "src/utils.ts"), "export const hello = 'world';");
-    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "import { hello } from './utils';\nconsole.log(hello);");
-    await writeFile(path.join(FIXTURES_DIR, "src/ignored.ts"), "console.log('I should not be here');");
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/utils.ts"),
+        "export const hello = 'world';",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/main.ts"),
+        "import { hello } from './utils';\nconsole.log(hello);",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/ignored.ts"),
+        "console.log('I should not be here');",
+    );
 
     // Pass ONLY main.ts, but expect utils.ts to be pulled in by AST tracing
     const { exitCode } = await runCli(["src/main.ts", "--out", "output.txt"]);
@@ -104,11 +138,24 @@ test("AST dependency tracing: automatically pulls in imported files", async () =
 
 test("CSS @import crawling: pulls in dependent stylesheets", async () => {
     await mkdir(path.join(FIXTURES_DIR, "styles"));
-    await writeFile(path.join(FIXTURES_DIR, "styles/reset.css"), "body { margin: 0; }");
-    await writeFile(path.join(FIXTURES_DIR, "styles/main.css"), "@import './reset.css';\n.app { color: red; }");
-    await writeFile(path.join(FIXTURES_DIR, "styles/ignored.css"), ".ignored { display: none; }");
+    await writeFile(
+        path.join(FIXTURES_DIR, "styles/reset.css"),
+        "body { margin: 0; }",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "styles/main.css"),
+        "@import './reset.css';\n.app { color: red; }",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "styles/ignored.css"),
+        ".ignored { display: none; }",
+    );
 
-    const { exitCode } = await runCli(["styles/main.css", "--out", "output.txt"]);
+    const { exitCode } = await runCli([
+        "styles/main.css",
+        "--out",
+        "output.txt",
+    ]);
     expect(exitCode).toBe(0);
 
     const content = await getOutputContent();
@@ -131,11 +178,24 @@ test("Safety features: automatically drops .env files", async () => {
 
 test("Binary files are dropped, text scripts are preserved", async () => {
     // Dockerfile (extensionless, but text)
-    await writeFile(path.join(FIXTURES_DIR, "Dockerfile"), "FROM ubuntu:latest");
+    await writeFile(
+        path.join(FIXTURES_DIR, "Dockerfile"),
+        "FROM ubuntu:latest",
+    );
     // Binary file mockup
-    await writeFile(path.join(FIXTURES_DIR, "image.png"), Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00]));
+    await writeFile(
+        path.join(FIXTURES_DIR, "image.png"),
+        Buffer.from([
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00,
+        ]),
+    );
 
-    const { exitCode } = await runCli(["Dockerfile", "image.png", "--out", "output.txt"]);
+    const { exitCode } = await runCli([
+        "Dockerfile",
+        "image.png",
+        "--out",
+        "output.txt",
+    ]);
     expect(exitCode).toBe(0);
 
     const content = await getOutputContent();
@@ -147,21 +207,44 @@ test("tricky trace: index.html with tsx and css, using --exclude", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
     await mkdir(path.join(FIXTURES_DIR, "src/components"));
 
-    await writeFile(path.join(FIXTURES_DIR, "index.html"), "<script type='module' src='./src/main.tsx'></script>");
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.html"),
+        "<script type='module' src='./src/main.tsx'></script>",
+    );
 
-    await writeFile(path.join(FIXTURES_DIR, "src/main.tsx"), "import './styles.css'; import { App } from './components/App'; console.log(App);");
-    await writeFile(path.join(FIXTURES_DIR, "src/styles.css"), "body { background: black; }");
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/main.tsx"),
+        "import './styles.css'; import { App } from './components/App'; console.log(App);",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/styles.css"),
+        "body { background: black; }",
+    );
 
-    await writeFile(path.join(FIXTURES_DIR, "src/components/App.tsx"), "export const App = () => <div>App</div>;");
-    await writeFile(path.join(FIXTURES_DIR, "src/components/SecretAdmin.tsx"), "export const Admin = () => <div>Secret</div>;");
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/components/App.tsx"),
+        "export const App = () => <div>App</div>;",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/components/SecretAdmin.tsx"),
+        "export const Admin = () => <div>Secret</div>;",
+    );
 
     // We pass index.html, it should pull in main.tsx -> styles.css and App.tsx
     // However, we exclude components/* so App.tsx should NOT be pulled in
-    const { exitCode } = await runCli(["index.html", "--exclude", "src/components/*", "--out", "output.txt"]);
+    const { exitCode } = await runCli([
+        "index.html",
+        "--exclude",
+        "src/components/*",
+        "--out",
+        "output.txt",
+    ]);
     expect(exitCode).toBe(0);
 
     const content = await getOutputContent();
-    expect(content).toContain("<script type='module' src='./src/main.tsx'></script>");
+    expect(content).toContain(
+        "<script type='module' src='./src/main.tsx'></script>",
+    );
     expect(content).toContain("import './styles.css';");
     expect(content).toContain("body { background: black; }");
 
@@ -173,14 +256,26 @@ test("tricky trace: index.html with tsx and css, using --exclude", async () => {
 
 test("deduplicates files included via multiple paths (AST, direct, glob)", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
-    await writeFile(path.join(FIXTURES_DIR, "src/utils.ts"), "export const util = true;");
-    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "import { util } from './utils'; console.log(util);");
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/utils.ts"),
+        "export const util = true;",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/main.ts"),
+        "import { util } from './utils'; console.log(util);",
+    );
 
     // We include it via:
     // 1. Entrypoint (main.ts imports utils.ts)
     // 2. Direct inclusion (utils.ts)
     // 3. Glob inclusion (src/* includes utils.ts)
-    const { exitCode } = await runCli(["src/main.ts", "src/utils.ts", "src/*", "--out", "output.txt"]);
+    const { exitCode } = await runCli([
+        "src/main.ts",
+        "src/utils.ts",
+        "src/*",
+        "--out",
+        "output.txt",
+    ]);
     expect(exitCode).toBe(0);
 
     const content = await getOutputContent();
@@ -201,9 +296,10 @@ test("Vite path resolver: handles absolute paths matching project root, public, 
     await mkdir(path.join(FIXTURES_DIR, "src"));
     await mkdir(path.join(FIXTURES_DIR, "public"));
     await mkdir(path.join(FIXTURES_DIR, "assets"));
-    
+
     // index.html referencing absolute paths
-    await writeFile(path.join(FIXTURES_DIR, "index.html"), 
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.html"),
         `<!doctype html>
         <html lang="en">
           <head>
@@ -214,12 +310,21 @@ test("Vite path resolver: handles absolute paths matching project root, public, 
           <body>
             <script type="module" src="/src/main.ts"></script>
           </body>
-        </html>`
+        </html>`,
     );
 
-    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "console.log('absolute src matched');");
-    await writeFile(path.join(FIXTURES_DIR, "public/favicon.svg"), "<svg>favicon</svg>");
-    await writeFile(path.join(FIXTURES_DIR, "assets/logo.png"), "<png>logo</png>"); // Mock image
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/main.ts"),
+        "console.log('absolute src matched');",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "public/favicon.svg"),
+        "<svg>favicon</svg>",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "assets/logo.png"),
+        "<png>logo</png>",
+    ); // Mock image
 
     const { exitCode } = await runCli(["index.html", "--out", "output.txt"]);
     expect(exitCode).toBe(0);
@@ -229,14 +334,14 @@ test("Vite path resolver: handles absolute paths matching project root, public, 
 
     // The src file should be correctly included
     expect(content).toContain("console.log('absolute src matched');");
-    
-    // Note: The binary image file (logo.png) might be skipped by checkIsTextFile, 
+
+    // Note: The binary image file (logo.png) might be skipped by checkIsTextFile,
     // but its path should be resolved successfully without crashing.
     // favicon.svg is also stripped as non-text (image/svg+xml), but the path should be present!
     expect(content).toContain("File: public/favicon.svg");
     expect(content).toContain("File: assets/logo.png");
     expect(content).toContain("File: src/main.ts");
-    
+
     // The missing.css file should NOT be in the output, but it shouldn't crash the build
     expect(content).not.toContain("File: missing.css");
 });
