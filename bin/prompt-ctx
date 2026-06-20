@@ -172,139 +172,137 @@ const viteResolverPlugin = {
     },
 };
 
-// --- GITIGNORE REGISTRY (Monorepo Support) ---
-type RuleLevel = { dir: string; excludes: string[]; whitelists: string[] };
+type GitignoreRule = {
+    pattern: string;
+    isNegation: boolean;
+};
 
-class GitignoreRegistry {
-    private caches = new Map<
-        string,
-        { excludes: string[]; whitelists: string[] }
-    >();
-    private rootDir = process.cwd();
+function parseGitignore(content: string, dir: string): GitignoreRule[] {
+    let relDir = path.relative(process.cwd(), dir).replace(/\\/g, "/");
+    if (relDir && !relDir.endsWith("/")) relDir += "/";
 
-    getRulesForPath(filePath: string): RuleLevel[] {
-        const levels: RuleLevel[] = [];
-        // Extract absolute directory of the target file
-        let currentDir = path.dirname(path.resolve(this.rootDir, filePath));
+    return content
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"))
+        .reverse()
+        .map((line) => {
+            const isNegation = line.startsWith("!");
+            if (isNegation) line = line.slice(1);
+            if (line.endsWith("/")) line = line.slice(0, -1);
 
-        while (currentDir.startsWith(this.rootDir)) {
-            if (!this.caches.has(currentDir)) {
-                const rules = this.loadForDirectorySync(currentDir);
-                this.caches.set(currentDir, rules);
+            let processed = line;
+            if (!line.startsWith("/")) {
+                if (!line.includes("/") && line.includes("*")) {
+                    processed = "**/" + line;
+                } else if (line.includes("/") && !line.startsWith("**")) {
+                    // Anchored relative to relDir
+                    processed = "/" + relDir + line;
+                }
+            } else {
+                // Anchored at this specific .gitignore level
+                processed = "/" + relDir + line.slice(1);
             }
 
-            const cached = this.caches.get(currentDir)!;
-            levels.push({
-                dir: currentDir,
-                excludes: cached.excludes,
-                whitelists: cached.whitelists,
-            });
-
-            if (currentDir === this.rootDir) break;
-            currentDir = path.dirname(currentDir);
-        }
-
-        return levels;
-    }
-
-    private loadForDirectorySync(dir: string): {
-        excludes: string[];
-        whitelists: string[];
-    } {
-        const file = path.join(dir, ".gitignore");
-        if (!existsSync(file)) return { excludes: [], whitelists: [] };
-
-        const content = readFileSync(file, "utf8");
-        const excludes: string[] = [];
-        const whitelists: string[] = [];
-
-        let relDir = path.relative(this.rootDir, dir).replace(/\\/g, "/");
-        if (relDir && !relDir.endsWith("/")) relDir += "/";
-
-        content
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter((line) => line && !line.startsWith("#"))
-            .forEach((line) => {
-                const isWhitelist = line.startsWith("!");
-                if (isWhitelist) line = line.slice(1);
-                if (line.endsWith("/")) line = line.slice(0, -1);
-
-                let processed = line;
-                if (!line.startsWith("/")) {
-                    if (!line.includes("/") && line.includes("*")) {
-                        processed = "**/" + line;
-                    } else if (line.includes("/") && !line.startsWith("**")) {
-                        // It has a slash, e.g., "src/*.js". It's anchored relative to relDir
-                        processed = "/" + relDir + line;
-                    }
-                    // Else, it's just "dist" or "**/*.log". Leave it as is.
-                } else {
-                    // Anchored at this specific .gitignore level
-                    processed = "/" + relDir + line.slice(1);
-                }
-
-                if (isWhitelist) whitelists.push(processed);
-                else excludes.push(processed);
-            });
-
-        return { excludes, whitelists };
-    }
+            return {
+                pattern: processed,
+                isNegation,
+            };
+        });
 }
 
-const gitignoreRegistry = new GitignoreRegistry();
-
-// --- PATTERN MATCHER HELPER ---
-function matchesPattern(normPath: string, pattern: string): boolean {
+function matchesGlob(filePath: string, pattern: string): boolean {
+    let globPattern = pattern;
     let isAnchored = false;
-    if (pattern.startsWith("/")) {
+
+    // Handle root-anchored patterns
+    if (globPattern.startsWith("/")) {
+        globPattern = globPattern.slice(1);
         isAnchored = true;
-        pattern = pattern.slice(1);
     }
 
-    if (pattern.includes("*")) {
-        const glob = new Glob(pattern);
-        return glob.match(normPath);
-    } else {
-        if (isAnchored) {
-            return normPath === pattern || normPath.startsWith(pattern + "/");
-        } else {
-            return (
-                normPath === pattern ||
-                normPath.startsWith(pattern + "/") ||
-                normPath.includes("/" + pattern + "/") ||
-                normPath.endsWith("/" + pattern)
-            );
+    try {
+        if (globPattern.includes("*")) {
+            const glob = new Glob(globPattern);
+            if (glob.match(filePath)) return true;
         }
+    } catch {}
+
+    // Fallback for simple non-glob patterns
+    if (isAnchored) {
+        return (
+            filePath === globPattern || filePath.startsWith(globPattern + "/")
+        );
+    } else {
+        return (
+            filePath === globPattern ||
+            filePath.startsWith(globPattern + "/") ||
+            filePath.includes("/" + globPattern + "/") ||
+            filePath.endsWith("/" + globPattern)
+        );
     }
 }
 
-// --- EXCLUSION CHECKER ---
-function isExcluded(filePath: string, baseExcludes: string[]) {
-    // Hardcoded safety nets
-    if (filePath.includes("node_modules/") || filePath.includes(".git/"))
-        return true;
+const gitignoreCache = new Map<string, GitignoreRule[]>();
 
+/**
+ * Collects .gitignore rules from the file's directory up to root.
+ * Returns rules in order: deepest first → root last.
+ */
+function getGitignoreRulesForFile(filePath: string): GitignoreRule[] {
+    const rules: GitignoreRule[] = [];
+    let currentDir = path.dirname(path.resolve(filePath));
+
+    while (currentDir.startsWith(process.cwd())) {
+        if (!gitignoreCache.has(currentDir)) {
+            const gitignorePath = path.join(currentDir, ".gitignore");
+            if (existsSync(gitignorePath)) {
+                const content = readFileSync(gitignorePath, "utf8");
+                gitignoreCache.set(
+                    currentDir,
+                    parseGitignore(content, currentDir),
+                );
+            } else {
+                gitignoreCache.set(currentDir, []);
+            }
+        }
+
+        rules.push(...gitignoreCache.get(currentDir)!);
+
+        if (currentDir === process.cwd()) break;
+        currentDir = path.dirname(currentDir);
+    }
+
+    return rules;
+}
+
+function isExcluded(filePath: string, cliExcludes: string[]): boolean {
     const normPath = filePath.replace(/\\/g, "/");
 
-    // 1. Absolute CLI Override Check (Gatekeeper)
-    for (const pattern of baseExcludes) {
-        if (matchesPattern(normPath, pattern)) return true;
+    // 1. Hard safety nets
+    if (normPath.includes("node_modules/") || normPath.includes(".git/")) {
+        return true;
     }
 
-    // 2. Gitignore Hierarchical Evaluation
-    // Dynamically retrieve gitignore rules up the tree for this specific file
-    const levels = gitignoreRegistry.getRulesForPath(normPath);
-
-    for (const level of levels) {
-        // Evaluate level-by-level, deepest first.
-        // First check whitelists at this level
-        for (const pattern of level.whitelists) {
-            if (matchesPattern(normPath, pattern)) return false;
+    // 2. CLI --exclude has highest priority
+    for (const pattern of cliExcludes) {
+        if (matchesGlob(normPath, pattern)) {
+            return true;
         }
-        // Then check excludes at this level
-        for (const pattern of level.excludes) {
-            if (matchesPattern(normPath, pattern)) return true;
+    }
+
+    // 3. Apply .gitignore rules (deepest → root)
+    const rules = getGitignoreRulesForFile(normPath);
+
+    for (const rule of rules) {
+        if (rule.isNegation) {
+            if (matchesGlob(normPath, rule.pattern)) {
+                return false; // Whitelisted
+            }
+        } else {
+            if (matchesGlob(normPath, rule.pattern)) {
+                return true; // Excluded
+            }
         }
     }
 
