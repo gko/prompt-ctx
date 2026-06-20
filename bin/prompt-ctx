@@ -29,6 +29,20 @@ async function checkIsTextFile(
         return true;
     }
 
+    const safeExtensions = new Set([
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".ini",
+        ".sql",
+        ".prisma",
+        ".md",
+        ".mdx",
+    ]);
+    if (safeExtensions.has(path.extname(file.name || "").toLowerCase())) {
+        return true;
+    }
+
     // Fallback for extensionless files (like `context`, `Dockerfile`)
     if (baseType === "application/octet-stream") {
         try {
