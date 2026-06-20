@@ -348,7 +348,10 @@ async function crawlTypeImports(
         for (const candidate of candidates) {
             if (existsSync(candidate)) {
                 const normCandidate = normalizePath(candidate);
-                if (!isExcluded(normCandidate, excludes)) {
+                if (
+                    !isExcluded(normCandidate, excludes) &&
+                    !visited.has(normCandidate)
+                ) {
                     await crawlTypeImports(normCandidate, excludes, visited);
                 }
                 break; // Found the matching file, stop checking candidates
