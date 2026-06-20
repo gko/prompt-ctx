@@ -85,3 +85,7 @@ bunx prompt-ctx src/main.ts --out my-feature.txt
 
 - **Secret Protection**: Explicitly ignores `.env` files to prevent leaking AWS or OpenAI keys to the LLM.
 - **Binary Filtering**: Automatically detects mime-types (`file.type`) to gracefully skip binary files, images, and executables, guaranteeing a clean text output.
+
+## License
+
+This project is open source and available under the [MIT](/LICENSE) license.
