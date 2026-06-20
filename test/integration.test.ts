@@ -196,3 +196,47 @@ test("deduplicates files included via multiple paths (AST, direct, glob)", async
     expect(mainMatches).not.toBeNull();
     expect(mainMatches?.length).toBe(1);
 });
+
+test("Vite path resolver: handles absolute paths matching project root, public, and assets dir", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src"));
+    await mkdir(path.join(FIXTURES_DIR, "public"));
+    await mkdir(path.join(FIXTURES_DIR, "assets"));
+    
+    // index.html referencing absolute paths
+    await writeFile(path.join(FIXTURES_DIR, "index.html"), 
+        `<!doctype html>
+        <html lang="en">
+          <head>
+            <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+            <link rel="icon" href="/logo.png" />
+            <link rel="stylesheet" href="/missing.css" />
+          </head>
+          <body>
+            <script type="module" src="/src/main.ts"></script>
+          </body>
+        </html>`
+    );
+
+    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "console.log('absolute src matched');");
+    await writeFile(path.join(FIXTURES_DIR, "public/favicon.svg"), "<svg>favicon</svg>");
+    await writeFile(path.join(FIXTURES_DIR, "assets/logo.png"), "<png>logo</png>"); // Mock image
+
+    const { exitCode } = await runCli(["index.html", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    // The src file should be correctly included
+    expect(content).toContain("console.log('absolute src matched');");
+    
+    // Note: The binary image file (logo.png) might be skipped by checkIsTextFile, 
+    // but its path should be resolved successfully without crashing.
+    // favicon.svg is also stripped as non-text (image/svg+xml), but the path should be present!
+    expect(content).toContain("File: public/favicon.svg");
+    expect(content).toContain("File: assets/logo.png");
+    expect(content).toContain("File: src/main.ts");
+    
+    // The missing.css file should NOT be in the output, but it shouldn't crash the build
+    expect(content).not.toContain("File: missing.css");
+});

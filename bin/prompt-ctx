@@ -69,8 +69,34 @@ function normalizePath(p: string) {
 const viteResolverPlugin = {
     name: "vite-resolver",
     setup(build: any) {
-        build.onResolve({ filter: /^\/[^/]/ }, (args: any) => {
-            return { path: path.join(process.cwd(), args.path) };
+        build.onResolve({ filter: /.*/ }, (args: any) => {
+            if (
+                path.isAbsolute(args.path) &&
+                args.path.startsWith(process.cwd())
+            ) {
+                if (existsSync(args.path)) return;
+
+                const relativeToCwd = path.relative(process.cwd(), args.path);
+                const publicPath = path.join(
+                    process.cwd(),
+                    "public",
+                    relativeToCwd,
+                );
+                if (existsSync(publicPath)) return { path: publicPath };
+
+                const assetsPath = path.join(
+                    process.cwd(),
+                    "assets",
+                    relativeToCwd,
+                );
+                if (existsSync(assetsPath)) return { path: assetsPath };
+
+                return { path: args.path, namespace: "ignore" };
+            }
+        });
+
+        build.onLoad({ filter: /.*/, namespace: "ignore" }, () => {
+            return { contents: "" };
         });
     },
 };
@@ -151,7 +177,7 @@ async function crawlCssImports(
     return visited;
 }
 
-import { statSync } from "fs";
+import { statSync, existsSync } from "fs";
 
 // --- MAIN ASSEMBLER ---
 async function assembleLlmContext(
@@ -184,8 +210,18 @@ async function assembleLlmContext(
                     } else {
                         inputs.add(normalizePath(pattern));
                     }
-                } catch {
-                    inputs.add(normalizePath(pattern));
+                } catch (error: any) {
+                    if (error.code === "ENOENT") {
+                        console.error(
+                            `❌ Error: File or directory not found: '${pattern}'`,
+                        );
+                    } else {
+                        console.error(
+                            `❌ Error accessing '${pattern}':`,
+                            error.message || error,
+                        );
+                    }
+                    process.exit(1);
                 }
             }
         }
@@ -205,27 +241,36 @@ async function assembleLlmContext(
 
         // 4. Let Bun trace the AST dependency tree for code files
         if (entrypoints.length > 0) {
-            const result = await Bun.build({
-                entrypoints: entrypoints,
-                target: "bun",
-                packages: "external",
-                metafile: true,
-                plugins: [viteResolverPlugin],
-            });
-
-            if (result.success && result.metafile) {
-                const metaStr = result.metafile;
-                const meta =
-                    typeof metaStr === "string" ? JSON.parse(metaStr) : metaStr;
-
-                Object.keys(meta.inputs || {}).forEach((f) => {
-                    const normPath = normalizePath(f);
-                    if (!isExcluded(normPath, excludes)) inputs.add(normPath);
+            try {
+                const result = await Bun.build({
+                    entrypoints: entrypoints,
+                    target: "bun",
+                    packages: "external",
+                    metafile: true,
+                    plugins: [viteResolverPlugin],
                 });
-            } else if (!result.success) {
+
+                if (result.success && result.metafile) {
+                    const metaStr = result.metafile;
+                    const meta =
+                        typeof metaStr === "string"
+                            ? JSON.parse(metaStr)
+                            : metaStr;
+
+                    Object.keys(meta.inputs || {}).forEach((f) => {
+                        const normPath = normalizePath(f);
+                        if (!isExcluded(normPath, excludes))
+                            inputs.add(normPath);
+                    });
+                } else if (!result.success) {
+                    console.warn(
+                        "⚠️ Bun had issues tracing some AST dependencies:",
+                        result.logs,
+                    );
+                }
+            } catch (buildError: any) {
                 console.warn(
-                    "⚠️ Bun had issues tracing some AST dependencies:",
-                    result.logs,
+                    `⚠️ AST Tracing failed: ${buildError.message || "Bundle failed"}. Proceeding with matched files only.`,
                 );
             }
         }
@@ -287,8 +332,9 @@ async function assembleLlmContext(
         console.log(
             `✅ Successfully assembled ${processedCount} files into ${finalOutputFile}`,
         );
-    } catch (error) {
-        console.error("❌ Error generating context:", error);
+    } catch (error: any) {
+        console.error(`❌ Error generating context: ${error.message || error}`);
+        process.exit(1);
     }
 }
 
