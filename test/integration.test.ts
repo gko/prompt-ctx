@@ -18,6 +18,13 @@ async function runCli(args: string[], cwd: string = FIXTURES_DIR) {
     return { stdout, stderr, exitCode };
 }
 
+async function getOutputContent() {
+    const files = await readdir(FIXTURES_DIR);
+    const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
+    if (outputFiles.length === 0) return null;
+    return await readFile(path.join(FIXTURES_DIR, outputFiles[0]), "utf-8");
+}
+
 beforeEach(async () => {
     if (existsSync(FIXTURES_DIR)) {
         await rm(FIXTURES_DIR, { recursive: true, force: true });
@@ -35,19 +42,18 @@ test("adds files and checks the hash in the file name", async () => {
     await writeFile(path.join(FIXTURES_DIR, "a.js"), "console.log('a');");
     await writeFile(path.join(FIXTURES_DIR, "b.js"), "console.log('b');");
 
-    const { exitCode, stdout, stderr } = await runCli(["a.js", "b.js", "--out", "output.txt"]);
+    const { exitCode } = await runCli(["a.js", "b.js", "--out", "output.txt"]);
     expect(exitCode).toBe(0);
 
     const files = await readdir(FIXTURES_DIR);
     const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
-    
     expect(outputFiles.length).toBe(1);
     
     const outputFile = outputFiles[0];
     const match = outputFile.match(/^output-([a-f0-9]{8})\.txt$/);
     expect(match).not.toBeNull();
     
-    const content = await readFile(path.join(FIXTURES_DIR, outputFile), "utf-8");
+    const content = await getOutputContent();
     expect(content).toContain("console.log('a');");
     expect(content).toContain("console.log('b');");
 });
@@ -60,31 +66,107 @@ test("adds files and ignores files that are in .gitignore", async () => {
     const { exitCode } = await runCli(["a.js", "secret.js", "--out", "output.txt"]);
     expect(exitCode).toBe(0);
 
-    const files = await readdir(FIXTURES_DIR);
-    const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
-    expect(outputFiles.length).toBe(1);
-    
-    const content = await readFile(path.join(FIXTURES_DIR, outputFiles[0]), "utf-8");
+    const content = await getOutputContent();
     expect(content).toContain("console.log('a');");
     expect(content).not.toContain("console.log('secret');");
 });
 
-test("adds folders and ignores some file patterns and doesn't see these files", async () => {
+test("adds folders and ignores some file patterns explicitly", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
     await mkdir(path.join(FIXTURES_DIR, "tests"));
     
     await writeFile(path.join(FIXTURES_DIR, "src/main.js"), "console.log('main');");
     await writeFile(path.join(FIXTURES_DIR, "tests/main.test.js"), "console.log('test');");
 
-    // Testing passing folders directly
     const { exitCode } = await runCli(["src", "tests", "--exclude", "tests/*", "--out", "output.txt"]);
     expect(exitCode).toBe(0);
 
-    const files = await readdir(FIXTURES_DIR);
-    const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
-    expect(outputFiles.length).toBe(1);
-    
-    const content = await readFile(path.join(FIXTURES_DIR, outputFiles[0]), "utf-8");
+    const content = await getOutputContent();
     expect(content).toContain("console.log('main');");
     expect(content).not.toContain("console.log('test');");
+});
+
+test("AST dependency tracing: automatically pulls in imported files", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src"));
+    await writeFile(path.join(FIXTURES_DIR, "src/utils.ts"), "export const hello = 'world';");
+    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "import { hello } from './utils';\nconsole.log(hello);");
+    await writeFile(path.join(FIXTURES_DIR, "src/ignored.ts"), "console.log('I should not be here');");
+
+    // Pass ONLY main.ts, but expect utils.ts to be pulled in by AST tracing
+    const { exitCode } = await runCli(["src/main.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("import { hello } from './utils';");
+    expect(content).toContain("export const hello = 'world';");
+    expect(content).not.toContain("I should not be here"); // Unrelated file is ignored!
+});
+
+test("CSS @import crawling: pulls in dependent stylesheets", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "styles"));
+    await writeFile(path.join(FIXTURES_DIR, "styles/reset.css"), "body { margin: 0; }");
+    await writeFile(path.join(FIXTURES_DIR, "styles/main.css"), "@import './reset.css';\n.app { color: red; }");
+    await writeFile(path.join(FIXTURES_DIR, "styles/ignored.css"), ".ignored { display: none; }");
+
+    const { exitCode } = await runCli(["styles/main.css", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain(".app { color: red; }");
+    expect(content).toContain("body { margin: 0; }");
+    expect(content).not.toContain(".ignored");
+});
+
+test("Safety features: automatically drops .env files", async () => {
+    await writeFile(path.join(FIXTURES_DIR, "a.js"), "console.log('a');");
+    await writeFile(path.join(FIXTURES_DIR, ".env"), "SECRET=SUPER_SECRET");
+
+    const { exitCode } = await runCli(["a.js", ".env", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("console.log('a');");
+    expect(content).not.toContain("SUPER_SECRET");
+});
+
+test("Binary files are dropped, text scripts are preserved", async () => {
+    // Dockerfile (extensionless, but text)
+    await writeFile(path.join(FIXTURES_DIR, "Dockerfile"), "FROM ubuntu:latest");
+    // Binary file mockup
+    await writeFile(path.join(FIXTURES_DIR, "image.png"), Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00]));
+
+    const { exitCode } = await runCli(["Dockerfile", "image.png", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("FROM ubuntu:latest");
+    expect(content).toContain("[BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]");
+});
+
+test("tricky trace: index.html with tsx and css, using --exclude", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src"));
+    await mkdir(path.join(FIXTURES_DIR, "src/components"));
+    
+    await writeFile(path.join(FIXTURES_DIR, "index.html"), "<script type='module' src='./src/main.tsx'></script>");
+    
+    await writeFile(path.join(FIXTURES_DIR, "src/main.tsx"), "import './styles.css'; import { App } from './components/App'; console.log(App);");
+    await writeFile(path.join(FIXTURES_DIR, "src/styles.css"), "body { background: black; }");
+    
+    await writeFile(path.join(FIXTURES_DIR, "src/components/App.tsx"), "export const App = () => <div>App</div>;");
+    await writeFile(path.join(FIXTURES_DIR, "src/components/SecretAdmin.tsx"), "export const Admin = () => <div>Secret</div>;");
+    
+    // We pass index.html, it should pull in main.tsx -> styles.css and App.tsx
+    // However, we exclude components/* so App.tsx should NOT be pulled in
+    const { exitCode } = await runCli(["index.html", "--exclude", "src/components/*", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("<script type='module' src='./src/main.tsx'></script>");
+    expect(content).toContain("import './styles.css';");
+    expect(content).toContain("body { background: black; }");
+    
+    // The excluded component should NOT be there
+    expect(content).not.toContain("export const App");
+    // The completely unreferenced component shouldn't be there either
+    expect(content).not.toContain("SecretAdmin");
 });
