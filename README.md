@@ -33,6 +33,21 @@ If you want to pack **only the files that actually matter** for a specific featu
 
 ---
 
+## Installation
+
+You don't need to install anything to use it:
+
+```bash
+bunx prompt-ctx src/main.ts
+```
+
+Or install it globally:
+```bash
+bun add -g prompt-ctx
+# or
+npm install -g prompt-ctx
+```
+
 ## Usage
 
 You don't even need to install it. Run it instantly anywhere via `bunx`:
