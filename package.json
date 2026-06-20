@@ -25,10 +25,10 @@
         "url": "https://github.com/gko/prompt-ctx/issues"
     },
     "bin": {
-        "prompt-ctx": "./context"
+        "prompt-ctx": "./bin/prompt-ctx"
     },
     "files": [
-        "context",
+        "bin",
         "README.md",
         "LICENSE"
     ],

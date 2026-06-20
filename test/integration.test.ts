@@ -4,7 +4,7 @@ import { existsSync } from "fs";
 import path from "path";
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures");
-const CLI_PATH = path.resolve(__dirname, "../context");
+const CLI_PATH = path.resolve(__dirname, "../bin/prompt-ctx");
 
 async function runCli(args: string[], cwd: string = FIXTURES_DIR) {
     const proc = Bun.spawn([CLI_PATH, ...args], {
@@ -48,11 +48,11 @@ test("adds files and checks the hash in the file name", async () => {
     const files = await readdir(FIXTURES_DIR);
     const outputFiles = files.filter(f => f.startsWith("output-") && f.endsWith(".txt"));
     expect(outputFiles.length).toBe(1);
-    
+
     const outputFile = outputFiles[0];
     const match = outputFile.match(/^output-([a-f0-9]{8})\.txt$/);
     expect(match).not.toBeNull();
-    
+
     const content = await getOutputContent();
     expect(content).toContain("console.log('a');");
     expect(content).toContain("console.log('b');");
@@ -74,7 +74,7 @@ test("adds files and ignores files that are in .gitignore", async () => {
 test("adds folders and ignores some file patterns explicitly", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
     await mkdir(path.join(FIXTURES_DIR, "tests"));
-    
+
     await writeFile(path.join(FIXTURES_DIR, "src/main.js"), "console.log('main');");
     await writeFile(path.join(FIXTURES_DIR, "tests/main.test.js"), "console.log('test');");
 
@@ -146,15 +146,15 @@ test("Binary files are dropped, text scripts are preserved", async () => {
 test("tricky trace: index.html with tsx and css, using --exclude", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src"));
     await mkdir(path.join(FIXTURES_DIR, "src/components"));
-    
+
     await writeFile(path.join(FIXTURES_DIR, "index.html"), "<script type='module' src='./src/main.tsx'></script>");
-    
+
     await writeFile(path.join(FIXTURES_DIR, "src/main.tsx"), "import './styles.css'; import { App } from './components/App'; console.log(App);");
     await writeFile(path.join(FIXTURES_DIR, "src/styles.css"), "body { background: black; }");
-    
+
     await writeFile(path.join(FIXTURES_DIR, "src/components/App.tsx"), "export const App = () => <div>App</div>;");
     await writeFile(path.join(FIXTURES_DIR, "src/components/SecretAdmin.tsx"), "export const Admin = () => <div>Secret</div>;");
-    
+
     // We pass index.html, it should pull in main.tsx -> styles.css and App.tsx
     // However, we exclude components/* so App.tsx should NOT be pulled in
     const { exitCode } = await runCli(["index.html", "--exclude", "src/components/*", "--out", "output.txt"]);
@@ -164,7 +164,7 @@ test("tricky trace: index.html with tsx and css, using --exclude", async () => {
     expect(content).toContain("<script type='module' src='./src/main.tsx'></script>");
     expect(content).toContain("import './styles.css';");
     expect(content).toContain("body { background: black; }");
-    
+
     // The excluded component should NOT be there
     expect(content).not.toContain("export const App");
     // The completely unreferenced component shouldn't be there either
@@ -185,12 +185,12 @@ test("deduplicates files included via multiple paths (AST, direct, glob)", async
 
     const content = await getOutputContent();
     if (!content) throw new Error("Output content is null");
-    
+
     // Check that 'utils.ts' header only appears exactly once in the final packed file
     const utilMatches = content.match(/\/\/ File: src\/utils\.ts/g);
     expect(utilMatches).not.toBeNull();
     expect(utilMatches?.length).toBe(1);
-    
+
     // Check that 'main.ts' header also only appears exactly once
     const mainMatches = content.match(/\/\/ File: src\/main\.ts/g);
     expect(mainMatches).not.toBeNull();
