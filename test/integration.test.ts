@@ -346,6 +346,71 @@ test("Vite path resolver: handles absolute paths matching project root, public, 
     expect(content).not.toContain("File: missing.css");
 });
 
+test(".gitignore: correctly handles nested wildcards and root-anchored rules", async () => {
+    // We want to test that `*.log` matches `src/errors.log`
+    // And `/dist` matches `dist` but NOT `src/dist`
+    // And `build/` matches `build` but NOT `src/build` (wait, actually `build/` anchored to root by the slash! So it shouldn't match src/build)
+
+    await writeFile(
+        path.join(FIXTURES_DIR, ".gitignore"),
+        `*.log
+/dist
+build/
+`,
+    );
+
+    await mkdir(path.join(FIXTURES_DIR, "src"));
+    await mkdir(path.join(FIXTURES_DIR, "dist"));
+    await mkdir(path.join(FIXTURES_DIR, "src/dist"));
+    await mkdir(path.join(FIXTURES_DIR, "build"));
+    await mkdir(path.join(FIXTURES_DIR, "src/build"));
+
+    // Nested wildcard
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/errors.log"),
+        "error log content",
+    );
+    // Root anchored
+    await writeFile(path.join(FIXTURES_DIR, "dist/main.js"), "dist content");
+    // Nested same name (should be kept)
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/dist/main.js"),
+        "src dist content",
+    );
+    // Root anchored (due to slash)
+    await writeFile(path.join(FIXTURES_DIR, "build/app.js"), "build content");
+    // Nested same name (should be excluded because `build/` without a middle/start slash matches anywhere)
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/build/app.js"),
+        "src build content",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.js"),
+        "console.log('hello');",
+    );
+
+    const { exitCode } = await runCli([".", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    // Standard inclusion
+    expect(content).toContain("File: index.js");
+
+    // Wildcard matches nested file
+    expect(content).not.toContain("File: src/errors.log");
+
+    // Root-anchored /dist excludes root dist but NOT src/dist
+    expect(content).not.toContain("File: dist/main.js");
+    expect(content).toContain("File: src/dist/main.js");
+
+    // Unanchored directory build/ excludes BOTH root build and src/build
+    expect(content).not.toContain("File: build/app.js");
+    expect(content).not.toContain("File: src/build/app.js");
+});
+
 test("Safety features: catches nested .gitignore exclusions matching exact filenames", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src/nested/deep"), {
         recursive: true,

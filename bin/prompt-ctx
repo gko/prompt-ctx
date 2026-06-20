@@ -178,11 +178,35 @@ async function loadGitignore(cwd: string): Promise<string[]> {
     if (!(await file.exists())) return [];
 
     const content = await file.text();
-    return content
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#")) // Ignore empty lines and comments
-        .map((line) => (line.endsWith("/") ? line.slice(0, -1) : line)); // Strip trailing slashes
+    return (
+        content
+            .split("\n")
+            .map((line) => line.trim())
+            // Ignore empty lines, comments, and unsupported un-excludes (!)
+            .filter(
+                (line) =>
+                    line && !line.startsWith("#") && !line.startsWith("!"),
+            )
+            .map((line) => {
+                if (line.endsWith("/")) line = line.slice(0, -1);
+
+                if (line.startsWith("/")) {
+                    return line; // Already root-anchored
+                }
+
+                // Standard gitignore glob transform
+                if (!line.includes("/") && line.includes("*")) {
+                    return "**/" + line; // e.g. "*.log" -> "**/*.log"
+                }
+
+                // If it contains a slash (but doesn't start with **), gitignore anchors it to root
+                if (line.includes("/") && !line.startsWith("**")) {
+                    return "/" + line; // e.g. "src/*.js" -> "/src/*.js"
+                }
+
+                return line;
+            })
+    );
 }
 
 // --- EXCLUSION CHECKER ---
@@ -191,20 +215,40 @@ function isExcluded(filePath: string, excludes: string[]) {
     if (filePath.includes("node_modules/") || filePath.includes(".git/"))
         return true;
 
-    for (const pattern of excludes) {
+    const normPath = filePath.replace(/\\/g, "/");
+
+    for (let pattern of excludes) {
+        let isAnchored = false;
+
+        // Extract internal anchor flag safely
+        if (pattern.startsWith("/")) {
+            isAnchored = true;
+            pattern = pattern.slice(1);
+        }
+
         if (pattern.includes("*")) {
             const glob = new Glob(pattern);
-            if (glob.match(filePath)) return true;
+            // If glob matching fails, we continue. We don't need manual anchored logic here
+            // because a glob like `src/*.js` inherently won't match `tests/src/a.js`.
+            if (glob.match(normPath)) return true;
         } else {
-            const normPattern = normalizePath(pattern);
-            // Matches exact file, or a directory match anywhere in the path
-            if (
-                filePath === normPattern ||
-                filePath.startsWith(normPattern + "/") ||
-                filePath.includes("/" + normPattern + "/") ||
-                filePath.endsWith("/" + normPattern)
-            ) {
-                return true;
+            // Exact or directory matches
+            if (isAnchored) {
+                if (
+                    normPath === pattern ||
+                    normPath.startsWith(pattern + "/")
+                ) {
+                    return true;
+                }
+            } else {
+                if (
+                    normPath === pattern ||
+                    normPath.startsWith(pattern + "/") ||
+                    normPath.includes("/" + pattern + "/") ||
+                    normPath.endsWith("/" + pattern)
+                ) {
+                    return true;
+                }
             }
         }
     }
