@@ -173,50 +173,77 @@ const viteResolverPlugin = {
 };
 
 // --- GITIGNORE PARSER ---
-async function loadGitignore(cwd: string): Promise<string[]> {
+async function loadGitignore(
+    cwd: string,
+): Promise<{ excludes: string[]; whitelists: string[] }> {
     const file = Bun.file(path.join(cwd, ".gitignore"));
-    if (!(await file.exists())) return [];
+    if (!(await file.exists())) return { excludes: [], whitelists: [] };
 
     const content = await file.text();
-    return (
-        content
-            .split("\n")
-            .map((line) => line.trim())
-            // Ignore empty lines, comments, and unsupported un-excludes (!)
-            .filter(
-                (line) =>
-                    line && !line.startsWith("#") && !line.startsWith("!"),
-            )
-            .map((line) => {
-                if (line.endsWith("/")) line = line.slice(0, -1);
+    const excludes: string[] = [];
+    const whitelists: string[] = [];
 
-                if (line.startsWith("/")) {
-                    return line; // Already root-anchored
-                }
+    content
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"))
+        .forEach((line) => {
+            const isWhitelist = line.startsWith("!");
+            if (isWhitelist) line = line.slice(1);
+            if (line.endsWith("/")) line = line.slice(0, -1);
 
-                // Standard gitignore glob transform
+            let processed = line;
+            if (!line.startsWith("/")) {
                 if (!line.includes("/") && line.includes("*")) {
-                    return "**/" + line; // e.g. "*.log" -> "**/*.log"
+                    processed = "**/" + line;
+                } else if (line.includes("/") && !line.startsWith("**")) {
+                    processed = "/" + line;
                 }
+            }
 
-                // If it contains a slash (but doesn't start with **), gitignore anchors it to root
-                if (line.includes("/") && !line.startsWith("**")) {
-                    return "/" + line; // e.g. "src/*.js" -> "/src/*.js"
-                }
+            if (isWhitelist) whitelists.push(processed);
+            else excludes.push(processed);
+        });
 
-                return line;
-            })
-    );
+    return { excludes, whitelists };
 }
 
 // --- EXCLUSION CHECKER ---
-function isExcluded(filePath: string, excludes: string[]) {
+function isExcluded(
+    filePath: string,
+    excludes: string[],
+    whitelists: string[] = [],
+) {
     // Hardcoded safety nets
     if (filePath.includes("node_modules/") || filePath.includes(".git/"))
         return true;
 
     const normPath = filePath.replace(/\\/g, "/");
 
+    // 1. Whitelist Check
+    for (let pattern of whitelists) {
+        let isAnchored = false;
+        if (pattern.startsWith("/")) {
+            isAnchored = true;
+            pattern = pattern.slice(1);
+        }
+
+        const glob = new Glob(pattern);
+
+        if (isAnchored) {
+            if (glob.match(normPath)) return false;
+        } else {
+            if (glob.match(normPath)) return false;
+
+            const parts = normPath.split("/");
+            for (let i = 0; i < parts.length; i++) {
+                const subPath = parts.slice(i).join("/");
+                if (glob.match(subPath)) return false;
+            }
+        }
+    }
+
+    // 2. Exclude Check
     for (let pattern of excludes) {
         let isAnchored = false;
 
@@ -274,6 +301,9 @@ async function crawlCssImports(
 
     while ((match = importRegex.exec(content)) !== null) {
         let importPath = match[1];
+
+        // Immediately ignore web protocols and embedded data URIs
+        if (/^(https?:|data:|ftp:|file:)/i.test(importPath)) continue;
 
         if (importPath.startsWith("/")) {
             importPath = path.join(process.cwd(), importPath);
@@ -341,6 +371,10 @@ async function crawlTypeImports(
             resolvedBase + ".ts",
             resolvedBase + ".d.ts",
             resolvedBase + ".tsx",
+            resolvedBase + ".mts",
+            resolvedBase + ".d.mts",
+            resolvedBase + ".cts",
+            resolvedBase + ".d.cts",
             path.join(resolvedBase, "index.ts"),
             path.join(resolvedBase, "index.d.ts"),
         ];
@@ -372,7 +406,8 @@ async function assembleLlmContext(
 
         // 0. Automatically merge .gitignore rules with user-provided excludes
         const gitignoreRules = await loadGitignore(process.cwd());
-        const excludes = [...baseExcludes, ...gitignoreRules];
+        const excludes = [...baseExcludes, ...gitignoreRules.excludes];
+        const whitelists = gitignoreRules.whitelists;
 
         // 1. Expand input globs and add explicit files
         for (const pattern of includes) {
@@ -415,7 +450,7 @@ async function assembleLlmContext(
 
         // 2. Initial scrub
         for (const file of Array.from(inputs)) {
-            if (isExcluded(file, excludes)) {
+            if (isExcluded(file, excludes, whitelists)) {
                 inputs.delete(file);
             }
         }
@@ -446,7 +481,7 @@ async function assembleLlmContext(
 
                     Object.keys(meta.inputs || {}).forEach((f) => {
                         const normPath = normalizePath(f);
-                        if (!isExcluded(normPath, excludes))
+                        if (!isExcluded(normPath, excludes, whitelists))
                             inputs.add(normPath);
                     });
                 } else if (!result.success) {
@@ -470,7 +505,7 @@ async function assembleLlmContext(
             for (const file of tsFiles) {
                 const typeDeps = await crawlTypeImports(file, excludes);
                 typeDeps.forEach((dep) => {
-                    if (!isExcluded(dep, excludes)) inputs.add(dep);
+                    if (!isExcluded(dep, excludes, whitelists)) inputs.add(dep);
                 });
             }
         }
@@ -481,7 +516,7 @@ async function assembleLlmContext(
             if (file.endsWith(".css")) {
                 const cssDeps = await crawlCssImports(file, excludes);
                 cssDeps.forEach((dep) => {
-                    if (!isExcluded(dep, excludes)) inputs.add(dep);
+                    if (!isExcluded(dep, excludes, whitelists)) inputs.add(dep);
                 });
             }
         }
@@ -496,44 +531,46 @@ async function assembleLlmContext(
         const writer = Bun.file(tmpOutputFile).writer();
         const hasher = new Bun.CryptoHasher("sha256");
 
-        const fileHeader = `// Context Assembled via AST/Glob Trace\n\n`;
-        writer.write(fileHeader);
-        hasher.update(fileHeader);
+        try {
+            const fileHeader = `// Context Assembled via AST/Glob Trace\n\n`;
+            writer.write(fileHeader);
+            hasher.update(fileHeader);
 
-        for (const filePath of sortedInputs) {
-            const file = Bun.file(filePath);
-            if (await file.exists()) {
-                const basename = path.basename(filePath);
+            for (const filePath of sortedInputs) {
+                const file = Bun.file(filePath);
+                if (await file.exists()) {
+                    const basename = path.basename(filePath);
 
-                // Safe check: Is it text based on mime-type and contents?
-                const isTextFile = await checkIsTextFile(file, basename);
+                    // Safe check: Is it text based on mime-type and contents?
+                    const isTextFile = await checkIsTextFile(file, basename);
 
-                let header = `// ==========================================\n`;
-                header += `// File: ${filePath}\n`;
-                header += `// ==========================================\n\n`;
+                    let header = `// ==========================================\n`;
+                    header += `// File: ${filePath}\n`;
+                    header += `// ==========================================\n\n`;
 
-                if (isTextFile) {
-                    // Load file chunks (Bun's arrayBuffer reads it as raw bytes fast)
-                    const chunk = await file.arrayBuffer();
+                    if (isTextFile) {
+                        // Load file chunks (Bun's arrayBuffer reads it as raw bytes fast)
+                        const chunk = await file.arrayBuffer();
 
-                    writer.write(header);
-                    hasher.update(header);
+                        writer.write(header);
+                        hasher.update(header);
 
-                    writer.write(chunk);
-                    hasher.update(chunk);
+                        writer.write(chunk);
+                        hasher.update(chunk);
 
-                    writer.write("\n\n");
-                    hasher.update("\n\n");
-                } else {
-                    header += `// [BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]\n\n`;
-                    writer.write(header);
-                    hasher.update(header);
+                        writer.write("\n\n");
+                        hasher.update("\n\n");
+                    } else {
+                        header += `// [BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]\n\n`;
+                        writer.write(header);
+                        hasher.update(header);
+                    }
+                    processedCount++;
                 }
-                processedCount++;
             }
+        } finally {
+            await writer.end();
         }
-
-        await writer.end();
 
         // 8. Compute SHA
         const shortSha = hasher.digest("hex").substring(0, 8);

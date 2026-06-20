@@ -496,3 +496,69 @@ test("UTF-8 parsing: safely preserves non-ASCII localized text and emojis", asyn
     expect(content).toContain("你好");
     expect(content).toContain("🚀🚀🚀");
 });
+
+test(".gitignore whitelists: properly preserves explicitly whitelisted files (!)", async () => {
+    // Setup a scenario where config/*.json is excluded, but config/production.json is whitelisted
+    await mkdir(path.join(FIXTURES_DIR, "config"), { recursive: true });
+    await writeFile(
+        path.join(FIXTURES_DIR, "config/dev.json"),
+        '{ "dev": true }',
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "config/production.json"),
+        '{ "prod": true }',
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, ".gitignore"),
+        `
+config/*.json
+!config/production.json
+    `.trim(),
+    );
+
+    // Run on the config folder
+    const { exitCode } = await runCli(["config", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    // config/dev.json should be missing
+    expect(content).not.toContain("File: config/dev.json");
+
+    // config/production.json should be present due to the whitelist
+    expect(content).toContain("File: config/production.json");
+    expect(content).toContain('{ "prod": true }');
+});
+
+test("CLI --exclude: correctly handles unanchored wildcards for deeply nested files", async () => {
+    // Create deeply nested files
+    await mkdir(path.join(FIXTURES_DIR, "src/utils"), { recursive: true });
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/utils/auth.ts"),
+        "export const auth = () => {};",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/utils/auth.spec.ts"),
+        "describe('auth', () => {});",
+    );
+
+    // Run CLI excluding *.spec.ts
+    const { exitCode } = await runCli([
+        "src",
+        "--exclude",
+        "*.spec.ts",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    // src/utils/auth.ts should be present
+    expect(content).toContain("File: src/utils/auth.ts");
+
+    // src/utils/auth.spec.ts should be excluded
+    expect(content).not.toContain("File: src/utils/auth.spec.ts");
+});
