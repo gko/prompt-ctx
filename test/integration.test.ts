@@ -170,3 +170,29 @@ test("tricky trace: index.html with tsx and css, using --exclude", async () => {
     // The completely unreferenced component shouldn't be there either
     expect(content).not.toContain("SecretAdmin");
 });
+
+test("deduplicates files included via multiple paths (AST, direct, glob)", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src"));
+    await writeFile(path.join(FIXTURES_DIR, "src/utils.ts"), "export const util = true;");
+    await writeFile(path.join(FIXTURES_DIR, "src/main.ts"), "import { util } from './utils'; console.log(util);");
+
+    // We include it via:
+    // 1. Entrypoint (main.ts imports utils.ts)
+    // 2. Direct inclusion (utils.ts)
+    // 3. Glob inclusion (src/* includes utils.ts)
+    const { exitCode } = await runCli(["src/main.ts", "src/utils.ts", "src/*", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+    
+    // Check that 'utils.ts' header only appears exactly once in the final packed file
+    const utilMatches = content.match(/\/\/ File: src\/utils\.ts/g);
+    expect(utilMatches).not.toBeNull();
+    expect(utilMatches?.length).toBe(1);
+    
+    // Check that 'main.ts' header also only appears exactly once
+    const mainMatches = content.match(/\/\/ File: src\/main\.ts/g);
+    expect(mainMatches).not.toBeNull();
+    expect(mainMatches?.length).toBe(1);
+});
