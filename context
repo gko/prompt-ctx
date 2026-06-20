@@ -191,7 +191,7 @@ async function assembleLlmContext(
             const result = await Bun.build({
                 entrypoints: entrypoints,
                 target: "bun",
-                external: ["*"],
+                packages: "external",
                 metafile: true,
                 plugins: [viteResolverPlugin],
             });
