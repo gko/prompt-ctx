@@ -14,8 +14,8 @@ Most "repo-to-text" tools rely purely on globs (`**/*.ts`). In a modern codebase
 
 ## The Solution: AST-Aware Tracing
 
-`prompt-ctx` doesn't just scan files; it uses Bun's internal bundler to **understand your code**. 
-If you point it at a single entrypoint like `src/app.tsx`, it will trace the Abstract Syntax Tree (AST), follow all the `import` statements, and pack **exactly the files needed** to run that component—nothing more, nothing less. 
+`prompt-ctx` doesn't just scan files; it uses Bun's internal bundler to **understand your code**.
+If you point it at a single entrypoint like `src/app.tsx`, it will trace the Abstract Syntax Tree (AST), follow all the `import` statements, and pack **exactly the files needed** to run that component—nothing more, nothing less.
 
 It does this instantly, natively, and with zero external dependencies.
 
@@ -23,12 +23,12 @@ It does this instantly, natively, and with zero external dependencies.
 
 Tools like **Repomix** are incredibly feature-rich and dominate the space for good reason. However, `prompt-ctx` is built specifically for a niche where it excels:
 
-- **Smarter Context (The Killer Feature)**: Repomix and others rely heavily on manual `.repomixignore` configurations or complex glob patterns to prune context. `prompt-ctx` relies on the code's actual import graph.
+- **Smarter Context**: Repomix and others rely heavily on manual `.repomixignore` configurations or complex glob patterns to prune context. `prompt-ctx` relies on the code's actual import graph.
 - **Tailor-made for Bun + Modern JS/TS**: Natively designed for the JS/TS ecosystem. It understands TypeScript, React, Vue, Svelte out of the box without needing to configure parsers.
 - **CSS `@import` Crawling**: Automatically traces and includes dependent stylesheets.
 - **Zero Bloat & Instant Execution**: No heavy node_modules. It runs directly via `bunx` in milliseconds.
 
-If you want an all-in-one generic repository packer with advanced XML formatting and token counts, use Repomix. 
+If you want an all-in-one generic repository packer with advanced XML formatting and token counts, use Repomix.
 If you want to pack **only the files that actually matter** for a specific feature you are working on, use `prompt-ctx`.
 
 ---

@@ -15,7 +15,7 @@
         "context-packer"
     ],
     "author": "Konstantin Gorodinskii <mail@konstantin.io>",
-    "license": "GPLv3",
+    "license": "MIT",
     "repository": {
         "type": "git",
         "url": "https://github.com/gko/prompt-ctx.git"
