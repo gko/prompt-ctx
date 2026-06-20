@@ -1,18 +1,42 @@
 {
-  "name": "prompt-ctx",
-  "version": "0.0.2",
-  "description": "",
-  "bin": {
-    "prompt-ctx": "./context"
-  },
-  "license": "GPLv3",
-  "author": "",
-  "type": "commonjs",
-  "main": "index.js",
-  "scripts": {
-    "test": "bun test"
-  },
-  "engines": {
-    "bun": ">=1.0.0"
-  }
+    "name": "prompt-ctx",
+    "version": "0.1.0",
+    "description": "The Bun-native, AST-aware context packer. Point it at your entrypoints and it automatically follows the import graph for LLMs.",
+    "keywords": [
+        "llm",
+        "context",
+        "prompt",
+        "bun",
+        "ast",
+        "cli",
+        "codebase",
+        "repomix",
+        "gitingest",
+        "context-packer"
+    ],
+    "author": "Konstantin Gorodinskii <mail@konstantin.io>",
+    "license": "GPLv3",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/gko/prompt-ctx.git"
+    },
+    "homepage": "https://github.com/gko/prompt-ctx#readme",
+    "bugs": {
+        "url": "https://github.com/gko/prompt-ctx/issues"
+    },
+    "bin": {
+        "prompt-ctx": "./context"
+    },
+    "files": [
+        "context",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "test": "bun test",
+        "prepublishOnly": "bun test"
+    },
+    "engines": {
+        "bun": ">=1.1.0"
+    }
 }
