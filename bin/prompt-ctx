@@ -191,16 +191,18 @@ function parseGitignore(content: string, dir: string): GitignoreRule[] {
             if (isNegation) line = line.slice(1);
             if (line.endsWith("/")) line = line.slice(0, -1);
 
+            if (line.endsWith("/*")) {
+                line = line.slice(0, -2);
+            }
+
             let processed = line;
             if (!line.startsWith("/")) {
                 if (!line.includes("/") && line.includes("*")) {
                     processed = "**/" + line;
                 } else if (line.includes("/") && !line.startsWith("**")) {
-                    // Anchored relative to relDir
                     processed = "/" + relDir + line;
                 }
             } else {
-                // Anchored at this specific .gitignore level
                 processed = "/" + relDir + line.slice(1);
             }
 
@@ -252,8 +254,9 @@ const gitignoreCache = new Map<string, GitignoreRule[]>();
 function getGitignoreRulesForFile(filePath: string): GitignoreRule[] {
     const rules: GitignoreRule[] = [];
     let currentDir = path.dirname(path.resolve(filePath));
+    const rootDir = process.cwd().toLowerCase(); // normalized root
 
-    while (currentDir.startsWith(process.cwd())) {
+    while (currentDir.toLowerCase().startsWith(rootDir)) {
         if (!gitignoreCache.has(currentDir)) {
             const gitignorePath = path.join(currentDir, ".gitignore");
             if (existsSync(gitignorePath)) {
@@ -269,7 +272,7 @@ function getGitignoreRulesForFile(filePath: string): GitignoreRule[] {
 
         rules.push(...gitignoreCache.get(currentDir)!);
 
-        if (currentDir === process.cwd()) break;
+        if (currentDir.toLowerCase() === rootDir) break;
         currentDir = path.dirname(currentDir);
     }
 
@@ -279,30 +282,25 @@ function getGitignoreRulesForFile(filePath: string): GitignoreRule[] {
 function isExcluded(filePath: string, cliExcludes: string[]): boolean {
     const normPath = filePath.replace(/\\/g, "/");
 
-    // 1. Hard safety nets
+    // Hard safety nets
     if (normPath.includes("node_modules/") || normPath.includes(".git/")) {
         return true;
     }
 
-    // 2. CLI --exclude has highest priority
+    // CLI has highest priority
     for (const pattern of cliExcludes) {
-        if (matchesGlob(normPath, pattern)) {
-            return true;
-        }
+        if (matchesGlob(normPath, pattern)) return true;
     }
 
-    // 3. Apply .gitignore rules (deepest → root)
+    // Gitignore rules (deepest first)
     const rules = getGitignoreRulesForFile(normPath);
 
     for (const rule of rules) {
-        if (rule.isNegation) {
-            if (matchesGlob(normPath, rule.pattern)) {
-                return false; // Whitelisted
-            }
-        } else {
-            if (matchesGlob(normPath, rule.pattern)) {
-                return true; // Excluded
-            }
+        if (rule.isNegation && matchesGlob(normPath, rule.pattern)) {
+            return false;
+        }
+        if (!rule.isNegation && matchesGlob(normPath, rule.pattern)) {
+            return true;
         }
     }
 
