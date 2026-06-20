@@ -1,6 +1,6 @@
 # prompt-ctx
 
-[![Run Tests](https://github.com/gko/prompt-ctx/actions/workflows/test.yml/badge.svg)](https://github.com/gko/prompt-ctx/actions/workflows/test.yml)
+[![npmjs.com](https://img.shields.io/npm/v/prompt-ctx.svg?color=blue)](https://www.npmjs.com/prompt-ctx) [![tests](https://github.com/gko/prompt-ctx/actions/workflows/test.yml/badge.svg)](https://github.com/gko/prompt-ctx/actions/workflows/test.yml)
 
 The Bun-native, AST-aware context packer. Point it at your entrypoints, and it automatically follows the import graph for you.
 
