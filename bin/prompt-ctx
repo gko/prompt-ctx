@@ -2,7 +2,7 @@
 import path from "path";
 import { Glob, type BunFile } from "bun";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 
 // --- FILE TYPE CHECKER ---
 async function checkIsTextFile(
