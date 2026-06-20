@@ -13,23 +13,24 @@ async function checkIsTextFile(
     if (basename.startsWith(".env")) return false;
 
     const type = file.type;
+    const baseType = type.split(";")[0];
 
     // Bun's mime checker identifies these as text/code
     if (
-        type.startsWith("text/") ||
-        type === "application/json" ||
-        type === "application/javascript" ||
-        type === "application/typescript" ||
-        type === "application/xml" ||
-        type === "application/graphql" ||
-        type === "application/x-sh" ||
-        type === "application/x-httpd-php"
+        baseType.startsWith("text/") ||
+        baseType === "application/json" ||
+        baseType === "application/javascript" ||
+        baseType === "application/typescript" ||
+        baseType === "application/xml" ||
+        baseType === "application/graphql" ||
+        baseType === "application/x-sh" ||
+        baseType === "application/x-httpd-php"
     ) {
         return true;
     }
 
     // Fallback for extensionless files (like `context`, `Dockerfile`)
-    if (type === "application/octet-stream") {
+    if (baseType === "application/octet-stream") {
         try {
             const buffer = new Uint8Array(
                 await file.slice(0, 1024).arrayBuffer(),
