@@ -2,6 +2,8 @@
 import path from "path";
 import { Glob, type BunFile } from "bun";
 
+const VERSION = "0.1.0";
+
 // --- FILE TYPE CHECKER ---
 async function checkIsTextFile(
     file: BunFile,
@@ -278,11 +280,30 @@ async function assembleLlmContext(
 // --- CLI ARGUMENT PARSER ---
 const args = Bun.argv.slice(2);
 
-if (args.length === 0) {
-    console.log(
-        "Usage: ./context.ts <includes...> [--exclude <excludes...>] [--out <output-file>]",
-    );
-    process.exit(1);
+if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+    console.log(`
+Usage: prompt-ctx <includes...> [options]
+
+The Bun-native, AST-aware context packer.
+
+Options:
+  --out <file>        Output filename (default: llm-context.txt)
+                      The final file will include an 8-char SHA (e.g. context-a1b2c3d4.txt)
+  --exclude <globs>   Additional patterns to ignore (merged with .gitignore)
+  --help, -h          Show this help message
+  --version, -v       Show version
+
+Examples:
+  prompt-ctx src/main.ts
+  prompt-ctx src/main.ts --out my-feature.txt
+  prompt-ctx src/**/* --exclude "**/*.test.*"
+`);
+    process.exit(0);
+}
+
+if (args.includes("--version") || args.includes("-v")) {
+    console.log(`prompt-ctx ${VERSION}`);
+    process.exit(0);
 }
 
 const includes: string[] = [];
