@@ -4,58 +4,129 @@ import { Glob, type BunFile } from "bun";
 
 const VERSION = "0.1.2";
 
+// O(1) Lookups
+const KNOWN_TEXT = new Set([
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".vue",
+    ".svelte",
+    ".html",
+    ".css",
+    ".json",
+    ".md",
+    ".mdx",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".ini",
+    ".sql",
+    ".prisma",
+    ".graphql",
+    ".sh",
+    ".py",
+    ".rb",
+    ".php",
+    ".rs",
+    ".go",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".kt",
+    ".txt",
+    ".csv",
+    ".swift",
+    ".dart",
+    ".zig",
+    ".lua",
+    ".scala",
+    ".hs",
+    ".ex",
+    ".erl",
+    ".clj",
+    ".ml",
+    ".fs",
+]);
+
+const KNOWN_BINARIES = new Set([
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".tiff",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".mp4",
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".7z",
+    ".rar",
+    ".pdf",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".wasm",
+    ".jar",
+    ".class",
+    ".pyc",
+    ".pck",
+    ".ipa",
+    ".apk",
+    ".aab",
+    ".dmg",
+]);
+
 // --- FILE TYPE CHECKER ---
 async function checkIsTextFile(
     file: BunFile,
     basename: string,
 ): Promise<boolean> {
-    // NO .env files allowed. Prevents leaking AWS/OpenAI keys.
-    if (basename.startsWith(".env")) return false;
+    // 0. Absolute security overrides
+    if (basename.startsWith(".env")) return false; // Prevents key leaks
 
-    const type = file.type;
-    const baseType = type.split(";")[0];
+    const ext = path.extname(basename).toLowerCase();
 
-    // Bun's mime checker identifies these as text/code
+    // 1. O(1) Fast Lanes (Catches ~95% of all real repository files)
+    if (KNOWN_TEXT.has(ext)) return true;
+    if (KNOWN_BINARIES.has(ext)) return false;
+
+    // 2. The standard MIME fallback (for standard web assets missed above)
+    const baseType = file.type.split(";")[0];
     if (
         baseType.startsWith("text/") ||
-        baseType === "application/json" ||
-        baseType === "application/javascript" ||
-        baseType === "application/typescript" ||
-        baseType === "application/xml" ||
-        baseType === "application/graphql" ||
-        baseType === "application/x-sh" ||
-        baseType === "application/x-httpd-php"
+        baseType.endsWith("/json") ||
+        baseType.endsWith("/xml")
     ) {
         return true;
     }
 
-    const safeExtensions = new Set([
-        ".yml",
-        ".yaml",
-        ".toml",
-        ".ini",
-        ".sql",
-        ".prisma",
-        ".md",
-        ".mdx",
-    ]);
-    if (safeExtensions.has(path.extname(file.name || "").toLowerCase())) {
-        return true;
-    }
+    // 3. The "Git 4K" Sniff (Only triggered for weird mystery files e.g. 'Dockerfile')
+    try {
+        const chunk = await file.slice(0, 4096).bytes();
+        if (chunk.length === 0) return true;
 
-    // Fallback for extensionless files (like `context`, `Dockerfile`)
-    if (baseType === "application/octet-stream") {
-        try {
-            const buffer = new Uint8Array(
-                await file.slice(0, 1024).arrayBuffer(),
-            );
-            return buffer.length === 0 || !buffer.includes(0);
-        } catch {
-            return false;
+        for (let i = 0; i < chunk.length; i++) {
+            if (chunk[i] === 0) return false; // Immediate Git-style binary kill
         }
-    }
 
-    return false;
+        return true;
+    } catch {
+        return false; // Unreadable = unsafe for LLM context
+    }
 }
 
 // --- PATH NORMALIZER ---
@@ -130,7 +201,8 @@ function isExcluded(filePath: string, excludes: string[]) {
             if (
                 filePath === normPattern ||
                 filePath.startsWith(normPattern + "/") ||
-                filePath.includes("/" + normPattern + "/")
+                filePath.includes("/" + normPattern + "/") ||
+                filePath.endsWith("/" + normPattern)
             ) {
                 return true;
             }

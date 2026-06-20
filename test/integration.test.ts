@@ -345,3 +345,46 @@ test("Vite path resolver: handles absolute paths matching project root, public, 
     // The missing.css file should NOT be in the output, but it shouldn't crash the build
     expect(content).not.toContain("File: missing.css");
 });
+
+test("Safety features: catches nested .gitignore exclusions matching exact filenames", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/nested/deep"), {
+        recursive: true,
+    });
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/main.js"),
+        "console.log('main');",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/nested/deep/database.sqlite"),
+        "binary_mock",
+    );
+
+    // Root gitignore ignoring the exact file name anywhere in the tree
+    await writeFile(path.join(FIXTURES_DIR, ".gitignore"), "database.sqlite\n");
+
+    const { exitCode } = await runCli(["src", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("console.log('main');");
+    expect(content).not.toContain("database.sqlite");
+});
+
+test("UTF-8 parsing: safely preserves non-ASCII localized text and emojis", async () => {
+    await writeFile(
+        path.join(FIXTURES_DIR, "multilingual.js"),
+        "// こんにちは世界\nconst greeting = '你好'; // 🚀🚀🚀",
+    );
+
+    const { exitCode } = await runCli([
+        "multilingual.js",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("こんにちは世界");
+    expect(content).toContain("你好");
+    expect(content).toContain("🚀🚀🚀");
+});
