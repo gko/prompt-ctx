@@ -562,3 +562,145 @@ test("CLI --exclude: correctly handles unanchored wildcards for deeply nested fi
     // src/utils/auth.spec.ts should be excluded
     expect(content).not.toContain("File: src/utils/auth.spec.ts");
 });
+
+test("Dynamic Workspace .gitignore (Monorepo): parses nested gitignores and applies them locally", async () => {
+    // Setup monorepo structure
+    await mkdir(path.join(FIXTURES_DIR, "apps/web/dist"), { recursive: true });
+    await mkdir(path.join(FIXTURES_DIR, "packages/ui/dist"), {
+        recursive: true,
+    });
+
+    // Valid source files
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/web/index.ts"),
+        "console.log('web');",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/ui/index.ts"),
+        "console.log('ui');",
+    );
+
+    // Dist files that should be ignored
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/web/dist/bundle.js"),
+        "web_bundle",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/ui/dist/bundle.js"),
+        "ui_bundle",
+    );
+
+    // The root gitignore
+    await writeFile(path.join(FIXTURES_DIR, ".gitignore"), "node_modules/\n");
+
+    // The localized nested gitignores
+    await writeFile(path.join(FIXTURES_DIR, "apps/web/.gitignore"), "dist/\n");
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/ui/.gitignore"),
+        "dist/\n",
+    );
+
+    const { exitCode } = await runCli(
+        [".", "--out", "output.txt"],
+        FIXTURES_DIR,
+    );
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent(FIXTURES_DIR);
+    if (!content) throw new Error("Output content is null");
+
+    // Should include standard source
+    expect(content).toContain("File: apps/web/index.ts");
+    expect(content).toContain("File: packages/ui/index.ts");
+
+    // Must NOT include nested dist folders due to localized .gitignore evaluation
+    expect(content).not.toContain("File: apps/web/dist/bundle.js");
+    expect(content).not.toContain("File: packages/ui/dist/bundle.js");
+});
+
+test("Level 6000: Variadic CLI --exclude swallows multiple files", async () => {
+    await writeFile(path.join(FIXTURES_DIR, "index.ts"), "const a = 1;");
+    await writeFile(path.join(FIXTURES_DIR, "drop1.ts"), "const b = 2;");
+    await writeFile(path.join(FIXTURES_DIR, "drop2.ts"), "const c = 3;");
+    await writeFile(path.join(FIXTURES_DIR, "keep.ts"), "const d = 4;");
+
+    const { exitCode } = await runCli([
+        "index.ts",
+        "keep.ts",
+        "--exclude",
+        "drop1.ts",
+        "drop2.ts",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    expect(content).toContain("File: index.ts");
+    expect(content).toContain("File: keep.ts");
+    expect(content).not.toContain("File: drop1.ts");
+    expect(content).not.toContain("File: drop2.ts");
+});
+
+test("Level 6000: CLI exclusions strictly override .gitignore whitelists", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "config"), { recursive: true });
+    await writeFile(path.join(FIXTURES_DIR, "config/database.json"), "secret");
+    await writeFile(
+        path.join(FIXTURES_DIR, ".gitignore"),
+        `
+config/*
+!config/database.json
+    `.trim(),
+    );
+
+    // CLI explicitly excludes the whitelisted database.json
+    const { exitCode } = await runCli([
+        "config",
+        "--exclude",
+        "config/database.json",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    // The file MUST be excluded despite the gitignore whitelist!
+    expect(content).not.toContain("File: config/database.json");
+});
+
+test("Level 6000: Monorepo deep exclusions strictly override higher whitelists", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "packages/api/dist"), {
+        recursive: true,
+    });
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/api/index.ts"),
+        "api_index",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/api/dist/bundle.js"),
+        "api_bundle",
+    );
+
+    // Root says "whitelist all dist files"
+    await writeFile(path.join(FIXTURES_DIR, ".gitignore"), `!dist/\n`);
+
+    // Deeper package explicitly ignores dist again
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/api/.gitignore"),
+        `dist/\n`,
+    );
+
+    const { exitCode } = await runCli(["packages", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    expect(content).toContain("File: packages/api/index.ts");
+    // The deep exclusion must win over the root whitelist
+    expect(content).not.toContain("File: packages/api/dist/bundle.js");
+});

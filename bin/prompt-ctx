@@ -172,120 +172,149 @@ const viteResolverPlugin = {
     },
 };
 
-// --- GITIGNORE PARSER ---
-async function loadGitignore(
-    cwd: string,
-): Promise<{ excludes: string[]; whitelists: string[] }> {
-    const file = Bun.file(path.join(cwd, ".gitignore"));
-    if (!(await file.exists())) return { excludes: [], whitelists: [] };
+// --- GITIGNORE REGISTRY (Monorepo Support) ---
+type RuleLevel = { dir: string; excludes: string[]; whitelists: string[] };
 
-    const content = await file.text();
-    const excludes: string[] = [];
-    const whitelists: string[] = [];
+class GitignoreRegistry {
+    private caches = new Map<
+        string,
+        { excludes: string[]; whitelists: string[] }
+    >();
+    private rootDir = process.cwd();
 
-    content
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"))
-        .forEach((line) => {
-            const isWhitelist = line.startsWith("!");
-            if (isWhitelist) line = line.slice(1);
-            if (line.endsWith("/")) line = line.slice(0, -1);
+    getRulesForPath(filePath: string): RuleLevel[] {
+        const levels: RuleLevel[] = [];
+        // Extract absolute directory of the target file
+        let currentDir = path.dirname(path.resolve(this.rootDir, filePath));
 
-            let processed = line;
-            if (!line.startsWith("/")) {
-                if (!line.includes("/") && line.includes("*")) {
-                    processed = "**/" + line;
-                } else if (line.includes("/") && !line.startsWith("**")) {
-                    processed = "/" + line;
-                }
+        while (currentDir.startsWith(this.rootDir)) {
+            if (!this.caches.has(currentDir)) {
+                const rules = this.loadForDirectorySync(currentDir);
+                this.caches.set(currentDir, rules);
             }
 
-            if (isWhitelist) whitelists.push(processed);
-            else excludes.push(processed);
-        });
+            const cached = this.caches.get(currentDir)!;
+            levels.push({
+                dir: currentDir,
+                excludes: cached.excludes,
+                whitelists: cached.whitelists,
+            });
 
-    return { excludes, whitelists };
+            if (currentDir === this.rootDir) break;
+            currentDir = path.dirname(currentDir);
+        }
+
+        return levels;
+    }
+
+    private loadForDirectorySync(dir: string): {
+        excludes: string[];
+        whitelists: string[];
+    } {
+        const file = path.join(dir, ".gitignore");
+        if (!existsSync(file)) return { excludes: [], whitelists: [] };
+
+        const content = readFileSync(file, "utf8");
+        const excludes: string[] = [];
+        const whitelists: string[] = [];
+
+        let relDir = path.relative(this.rootDir, dir).replace(/\\/g, "/");
+        if (relDir && !relDir.endsWith("/")) relDir += "/";
+
+        content
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line && !line.startsWith("#"))
+            .forEach((line) => {
+                const isWhitelist = line.startsWith("!");
+                if (isWhitelist) line = line.slice(1);
+                if (line.endsWith("/")) line = line.slice(0, -1);
+
+                let processed = line;
+                if (!line.startsWith("/")) {
+                    if (!line.includes("/") && line.includes("*")) {
+                        processed = "**/" + line;
+                    } else if (line.includes("/") && !line.startsWith("**")) {
+                        // It has a slash, e.g., "src/*.js". It's anchored relative to relDir
+                        processed = "/" + relDir + line;
+                    }
+                    // Else, it's just "dist" or "**/*.log". Leave it as is.
+                } else {
+                    // Anchored at this specific .gitignore level
+                    processed = "/" + relDir + line.slice(1);
+                }
+
+                if (isWhitelist) whitelists.push(processed);
+                else excludes.push(processed);
+            });
+
+        return { excludes, whitelists };
+    }
+}
+
+const gitignoreRegistry = new GitignoreRegistry();
+
+// --- PATTERN MATCHER HELPER ---
+function matchesPattern(normPath: string, pattern: string): boolean {
+    let isAnchored = false;
+    if (pattern.startsWith("/")) {
+        isAnchored = true;
+        pattern = pattern.slice(1);
+    }
+
+    if (pattern.includes("*")) {
+        const glob = new Glob(pattern);
+        return glob.match(normPath);
+    } else {
+        if (isAnchored) {
+            return normPath === pattern || normPath.startsWith(pattern + "/");
+        } else {
+            return (
+                normPath === pattern ||
+                normPath.startsWith(pattern + "/") ||
+                normPath.includes("/" + pattern + "/") ||
+                normPath.endsWith("/" + pattern)
+            );
+        }
+    }
 }
 
 // --- EXCLUSION CHECKER ---
-function isExcluded(
-    filePath: string,
-    excludes: string[],
-    whitelists: string[] = [],
-) {
+function isExcluded(filePath: string, baseExcludes: string[]) {
     // Hardcoded safety nets
     if (filePath.includes("node_modules/") || filePath.includes(".git/"))
         return true;
 
     const normPath = filePath.replace(/\\/g, "/");
 
-    // 1. Whitelist Check
-    for (let pattern of whitelists) {
-        let isAnchored = false;
-        if (pattern.startsWith("/")) {
-            isAnchored = true;
-            pattern = pattern.slice(1);
+    // 1. Absolute CLI Override Check (Gatekeeper)
+    for (const pattern of baseExcludes) {
+        if (matchesPattern(normPath, pattern)) return true;
+    }
+
+    // 2. Gitignore Hierarchical Evaluation
+    // Dynamically retrieve gitignore rules up the tree for this specific file
+    const levels = gitignoreRegistry.getRulesForPath(normPath);
+
+    for (const level of levels) {
+        // Evaluate level-by-level, deepest first.
+        // First check whitelists at this level
+        for (const pattern of level.whitelists) {
+            if (matchesPattern(normPath, pattern)) return false;
         }
-
-        const glob = new Glob(pattern);
-
-        if (isAnchored) {
-            if (glob.match(normPath)) return false;
-        } else {
-            if (glob.match(normPath)) return false;
-
-            const parts = normPath.split("/");
-            for (let i = 0; i < parts.length; i++) {
-                const subPath = parts.slice(i).join("/");
-                if (glob.match(subPath)) return false;
-            }
+        // Then check excludes at this level
+        for (const pattern of level.excludes) {
+            if (matchesPattern(normPath, pattern)) return true;
         }
     }
 
-    // 2. Exclude Check
-    for (let pattern of excludes) {
-        let isAnchored = false;
-
-        // Extract internal anchor flag safely
-        if (pattern.startsWith("/")) {
-            isAnchored = true;
-            pattern = pattern.slice(1);
-        }
-
-        if (pattern.includes("*")) {
-            const glob = new Glob(pattern);
-            // If glob matching fails, we continue. We don't need manual anchored logic here
-            // because a glob like `src/*.js` inherently won't match `tests/src/a.js`.
-            if (glob.match(normPath)) return true;
-        } else {
-            // Exact or directory matches
-            if (isAnchored) {
-                if (
-                    normPath === pattern ||
-                    normPath.startsWith(pattern + "/")
-                ) {
-                    return true;
-                }
-            } else {
-                if (
-                    normPath === pattern ||
-                    normPath.startsWith(pattern + "/") ||
-                    normPath.includes("/" + pattern + "/") ||
-                    normPath.endsWith("/" + pattern)
-                ) {
-                    return true;
-                }
-            }
-        }
-    }
     return false;
 }
 
 // --- CSS @IMPORT CRAWLER ---
 async function crawlCssImports(
     filePath: string,
-    excludes: string[],
+    baseExcludes: string[],
     visited = new Set<string>(),
 ) {
     const normalizedFilePath = normalizePath(filePath);
@@ -315,15 +344,15 @@ async function crawlCssImports(
         }
 
         const normImportPath = normalizePath(importPath);
-        if (!isExcluded(normImportPath, excludes)) {
-            await crawlCssImports(normImportPath, excludes, visited);
+        if (!isExcluded(normImportPath, baseExcludes)) {
+            await crawlCssImports(normImportPath, baseExcludes, visited);
         }
     }
 
     return visited;
 }
 
-import { statSync, existsSync, renameSync } from "fs";
+import { statSync, existsSync, renameSync, readFileSync } from "fs";
 
 // --- GLOB OPTIMIZER ---
 function extractGlobBase(pattern: string): string {
@@ -345,7 +374,7 @@ function extractGlobBase(pattern: string): string {
 // --- TYPESCRIPT .d.ts CRAWLER ---
 async function crawlTypeImports(
     filePath: string,
-    excludes: string[],
+    baseExcludes: string[],
     visited = new Set<string>(),
 ) {
     const normPath = normalizePath(filePath);
@@ -383,10 +412,14 @@ async function crawlTypeImports(
             if (existsSync(candidate)) {
                 const normCandidate = normalizePath(candidate);
                 if (
-                    !isExcluded(normCandidate, excludes) &&
+                    !isExcluded(normCandidate, baseExcludes) &&
                     !visited.has(normCandidate)
                 ) {
-                    await crawlTypeImports(normCandidate, excludes, visited);
+                    await crawlTypeImports(
+                        normCandidate,
+                        baseExcludes,
+                        visited,
+                    );
                 }
                 break; // Found the matching file, stop checking candidates
             }
@@ -404,10 +437,29 @@ async function assembleLlmContext(
     try {
         let inputs = new Set<string>();
 
-        // 0. Automatically merge .gitignore rules with user-provided excludes
-        const gitignoreRules = await loadGitignore(process.cwd());
-        const excludes = [...baseExcludes, ...gitignoreRules.excludes];
-        const whitelists = gitignoreRules.whitelists;
+        // Normalize CLI exclusions using Gitignore-style glob expansion
+        const normalizedBaseExcludes = baseExcludes.map((pattern) => {
+            if (
+                !pattern.startsWith("/") &&
+                !pattern.includes("/") &&
+                pattern.includes("*")
+            ) {
+                return "**/" + pattern;
+            }
+            return pattern;
+        });
+
+        // Ouroboros fix: prevent prompt-ctx from ingesting its own previous outputs
+        // Level 5000: explicitly anchor these to the root so we don't nuke "docs/llm-context.txt"
+        const outBase = path.basename(outputFile, path.extname(outputFile));
+        const selfExcludes = [
+            `/${outputFile}`,
+            `/${outBase}*${path.extname(outputFile)}`,
+            `/${outBase}*.txt`,
+        ];
+
+        // Combine CLI and self excludes (gitignore is resolved dynamically per-file inside isExcluded)
+        const globalExcludes = [...normalizedBaseExcludes, ...selfExcludes];
 
         // 1. Expand input globs and add explicit files
         for (const pattern of includes) {
@@ -427,7 +479,13 @@ async function assembleLlmContext(
                     if (stat.isDirectory()) {
                         const glob = new Glob("**/*");
                         for (const file of glob.scanSync(pattern)) {
-                            inputs.add(normalizePath(path.join(pattern, file)));
+                            const fullPath = normalizePath(
+                                path.join(pattern, file),
+                            );
+                            // Gatekeeper: Never let node_modules or excluded files enter the Set!
+                            if (!isExcluded(fullPath, globalExcludes)) {
+                                inputs.add(fullPath);
+                            }
                         }
                     } else {
                         inputs.add(normalizePath(pattern));
@@ -450,7 +508,7 @@ async function assembleLlmContext(
 
         // 2. Initial scrub
         for (const file of Array.from(inputs)) {
-            if (isExcluded(file, excludes, whitelists)) {
+            if (isExcluded(file, globalExcludes)) {
                 inputs.delete(file);
             }
         }
@@ -481,7 +539,7 @@ async function assembleLlmContext(
 
                     Object.keys(meta.inputs || {}).forEach((f) => {
                         const normPath = normalizePath(f);
-                        if (!isExcluded(normPath, excludes, whitelists))
+                        if (!isExcluded(normPath, globalExcludes))
                             inputs.add(normPath);
                     });
                 } else if (!result.success) {
@@ -502,21 +560,31 @@ async function assembleLlmContext(
                 typeableExts.has(path.extname(f).toLowerCase()),
             );
 
+            const globalTypeVisited = new Set<string>();
             for (const file of tsFiles) {
-                const typeDeps = await crawlTypeImports(file, excludes);
+                const typeDeps = await crawlTypeImports(
+                    file,
+                    globalExcludes,
+                    globalTypeVisited,
+                );
                 typeDeps.forEach((dep) => {
-                    if (!isExcluded(dep, excludes, whitelists)) inputs.add(dep);
+                    if (!isExcluded(dep, globalExcludes)) inputs.add(dep);
                 });
             }
         }
 
         // 5. CSS Scan
         const initialFiles = Array.from(inputs);
+        const globalCssVisited = new Set<string>();
         for (const file of initialFiles) {
             if (file.endsWith(".css")) {
-                const cssDeps = await crawlCssImports(file, excludes);
+                const cssDeps = await crawlCssImports(
+                    file,
+                    globalExcludes,
+                    globalCssVisited,
+                );
                 cssDeps.forEach((dep) => {
-                    if (!isExcluded(dep, excludes, whitelists)) inputs.add(dep);
+                    if (!isExcluded(dep, globalExcludes)) inputs.add(dep);
                 });
             }
         }
@@ -549,14 +617,14 @@ async function assembleLlmContext(
                     header += `// ==========================================\n\n`;
 
                     if (isTextFile) {
-                        // Load file chunks (Bun's arrayBuffer reads it as raw bytes fast)
-                        const chunk = await file.arrayBuffer();
-
                         writer.write(header);
                         hasher.update(header);
 
-                        writer.write(chunk);
-                        hasher.update(chunk);
+                        // True O(1) Memory Streaming
+                        for await (const chunk of file.stream()) {
+                            writer.write(chunk);
+                            hasher.update(chunk);
+                        }
 
                         writer.write("\n\n");
                         hasher.update("\n\n");
@@ -626,25 +694,26 @@ if (args.includes("--version") || args.includes("-v")) {
 const includes: string[] = [];
 const excludes: string[] = [];
 let outputFile = "llm-context.txt";
-let currentMode: "include" | "exclude" | "out" = "include";
 
-for (const arg of args) {
+for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (arg === "--exclude") {
-        currentMode = "exclude";
+        while (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+            excludes.push(args[i + 1]);
+            i++;
+        }
         continue;
     }
     if (arg === "--out") {
-        currentMode = "out";
+        if (i + 1 < args.length) {
+            outputFile = args[i + 1];
+            i++;
+        }
         continue;
     }
 
-    if (currentMode === "include") {
+    if (!arg.startsWith("-")) {
         includes.push(arg);
-    } else if (currentMode === "exclude") {
-        excludes.push(arg);
-    } else if (currentMode === "out") {
-        outputFile = arg;
-        currentMode = "include";
     }
 }
 
