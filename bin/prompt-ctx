@@ -699,11 +699,7 @@ for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
     if (arg === "--exclude") {
-        while (
-            i + 1 < args.length &&
-            !args[i + 1].startsWith("-") &&
-            !existsSync(args[i + 1])
-        ) {
+        while (i + 1 < args.length && !args[i + 1].startsWith("-")) {
             excludes.push(args[i + 1]);
             i++;
         }
