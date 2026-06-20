@@ -293,7 +293,70 @@ async function crawlCssImports(
     return visited;
 }
 
-import { statSync, existsSync } from "fs";
+import { statSync, existsSync, renameSync } from "fs";
+
+// --- GLOB OPTIMIZER ---
+function extractGlobBase(pattern: string): string {
+    const globChars = ["*", "?", "[", "{"];
+    let firstGlobIndex = -1;
+    for (const char of globChars) {
+        const idx = pattern.indexOf(char);
+        if (idx !== -1 && (firstGlobIndex === -1 || idx < firstGlobIndex)) {
+            firstGlobIndex = idx;
+        }
+    }
+    if (firstGlobIndex === -1) return ".";
+
+    const prefix = pattern.substring(0, firstGlobIndex);
+    const baseDir = path.dirname(prefix + "a"); // Ensure we stop at the last slash
+    return baseDir === "." ? "." : baseDir;
+}
+
+// --- TYPESCRIPT .d.ts CRAWLER ---
+async function crawlTypeImports(
+    filePath: string,
+    excludes: string[],
+    visited = new Set<string>(),
+) {
+    const normPath = normalizePath(filePath);
+    if (visited.has(normPath)) return visited;
+    visited.add(normPath);
+
+    const file = Bun.file(normPath);
+    if (!(await file.exists())) return visited;
+
+    const content = await file.text();
+    // Catch `import type ... from "..."`, `import { type ... } from "..."`, `export type ... from "..."`
+    const importRegex =
+        /(?:import|export)\s+.*?(?:type\s+[^'"]*)?from\s+['"]([^'"]+)['"]/g;
+
+    let match;
+    while ((match = importRegex.exec(content)) !== null) {
+        const importPath = match[1];
+        if (!importPath.startsWith(".")) continue; // Ignore package imports
+
+        const resolvedBase = path.resolve(path.dirname(normPath), importPath);
+
+        const candidates = [
+            resolvedBase + ".ts",
+            resolvedBase + ".d.ts",
+            resolvedBase + ".tsx",
+            path.join(resolvedBase, "index.ts"),
+            path.join(resolvedBase, "index.d.ts"),
+        ];
+
+        for (const candidate of candidates) {
+            if (existsSync(candidate)) {
+                const normCandidate = normalizePath(candidate);
+                if (!isExcluded(normCandidate, excludes)) {
+                    await crawlTypeImports(normCandidate, excludes, visited);
+                }
+                break; // Found the matching file, stop checking candidates
+            }
+        }
+    }
+    return visited;
+}
 
 // --- MAIN ASSEMBLER ---
 async function assembleLlmContext(
@@ -311,9 +374,14 @@ async function assembleLlmContext(
         // 1. Expand input globs and add explicit files
         for (const pattern of includes) {
             if (pattern.includes("*")) {
-                const glob = new Glob(pattern);
-                for (const file of glob.scanSync(".")) {
-                    inputs.add(normalizePath(file));
+                const baseDir = extractGlobBase(pattern);
+                const relPattern = path
+                    .relative(baseDir, pattern)
+                    .replace(/\\/g, "/");
+                const glob = new Glob(relPattern);
+                // Important: Bun's glob matching logic needs the results mapped correctly
+                for (const file of glob.scanSync(baseDir)) {
+                    inputs.add(normalizePath(path.join(baseDir, file)));
                 }
             } else {
                 try {
@@ -389,6 +457,19 @@ async function assembleLlmContext(
                     `⚠️ AST Tracing failed: ${buildError.message || "Bundle failed"}. Proceeding with matched files only.`,
                 );
             }
+
+            // 4.5. TS Type Crawling (recover ghosted .d.ts files from imports)
+            const typeableExts = new Set([".ts", ".tsx", ".vue"]);
+            const tsFiles = Array.from(inputs).filter((f) =>
+                typeableExts.has(path.extname(f).toLowerCase()),
+            );
+
+            for (const file of tsFiles) {
+                const typeDeps = await crawlTypeImports(file, excludes);
+                typeDeps.forEach((dep) => {
+                    if (!isExcluded(dep, excludes)) inputs.add(dep);
+                });
+            }
         }
 
         // 5. CSS Scan
@@ -402,13 +483,20 @@ async function assembleLlmContext(
             }
         }
 
-        let mergedContent = `// Context Assembled via AST/Glob Trace\n\n`;
         let processedCount = 0;
 
         // 6. Sort inputs alphabetically for deterministic output
         const sortedInputs = Array.from(inputs).sort();
 
-        // 7. Read and append files safely
+        // 7. Read and append files safely via streaming
+        const tmpOutputFile = outputFile + ".tmp";
+        const writer = Bun.file(tmpOutputFile).writer();
+        const hasher = new Bun.CryptoHasher("sha256");
+
+        const fileHeader = `// Context Assembled via AST/Glob Trace\n\n`;
+        writer.write(fileHeader);
+        hasher.update(fileHeader);
+
         for (const filePath of sortedInputs) {
             const file = Bun.file(filePath);
             if (await file.exists()) {
@@ -417,23 +505,34 @@ async function assembleLlmContext(
                 // Safe check: Is it text based on mime-type and contents?
                 const isTextFile = await checkIsTextFile(file, basename);
 
-                mergedContent += `// ==========================================\n`;
-                mergedContent += `// File: ${filePath}\n`;
-                mergedContent += `// ==========================================\n\n`;
+                let header = `// ==========================================\n`;
+                header += `// File: ${filePath}\n`;
+                header += `// ==========================================\n\n`;
 
                 if (isTextFile) {
-                    const content = await file.text();
-                    mergedContent += `${content}\n\n`;
+                    // Load file chunks (Bun's arrayBuffer reads it as raw bytes fast)
+                    const chunk = await file.arrayBuffer();
+
+                    writer.write(header);
+                    hasher.update(header);
+
+                    writer.write(chunk);
+                    hasher.update(chunk);
+
+                    writer.write("\n\n");
+                    hasher.update("\n\n");
                 } else {
-                    mergedContent += `// [BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]\n\n`;
+                    header += `// [BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]\n\n`;
+                    writer.write(header);
+                    hasher.update(header);
                 }
                 processedCount++;
             }
         }
 
+        await writer.end();
+
         // 8. Compute SHA
-        const hasher = new Bun.CryptoHasher("sha256");
-        hasher.update(mergedContent);
         const shortSha = hasher.digest("hex").substring(0, 8);
 
         // 9. Inject SHA into filename
@@ -443,8 +542,9 @@ async function assembleLlmContext(
                 ? `${outputFile.substring(0, extIndex)}-${shortSha}${outputFile.substring(extIndex)}`
                 : `${outputFile}-${shortSha}`;
 
-        // 10. Write out
-        await Bun.write(finalOutputFile, mergedContent);
+        // 10. Atomic Swap
+        renameSync(tmpOutputFile, finalOutputFile);
+
         console.log(
             `✅ Successfully assembled ${processedCount} files into ${finalOutputFile}`,
         );

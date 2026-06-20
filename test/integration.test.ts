@@ -411,6 +411,49 @@ build/
     expect(content).not.toContain("File: src/build/app.js");
 });
 
+test("TypeScript .d.ts tracking: safely recovers types dropped by AST bundler", async () => {
+    // Bun's AST bundler drops files that emit no runtime code (e.g. ambient types or import type)
+    // We want to ensure prompt-ctx recovers them via crawlTypeImports.
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.ts"),
+        `
+        import type { User } from "./types";
+        import { processUser } from "./utils";
+        console.log("running");
+    `,
+    );
+
+    // Standalone type file
+    await writeFile(
+        path.join(FIXTURES_DIR, "types.d.ts"),
+        `
+        export interface User { id: string; }
+    `,
+    );
+
+    // Normal imported file
+    await writeFile(
+        path.join(FIXTURES_DIR, "utils.ts"),
+        `
+        export const processUser = (u: any) => {};
+    `,
+    );
+
+    const { exitCode } = await runCli(["index.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    if (!content) throw new Error("Output content is null");
+
+    // The runtime dependency should be there
+    expect(content).toContain("File: utils.ts");
+
+    // The type dependency should ALSO be recovered!
+    expect(content).toContain("File: types.d.ts");
+    expect(content).toContain("export interface User");
+});
+
 test("Safety features: catches nested .gitignore exclusions matching exact filenames", async () => {
     await mkdir(path.join(FIXTURES_DIR, "src/nested/deep"), {
         recursive: true,
