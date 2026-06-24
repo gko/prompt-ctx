@@ -1,6 +1,6 @@
 {
     "name": "prompt-ctx",
-    "version": "0.2.2",
+    "version": "0.2.3",
     "description": "The Bun-native, AST-aware context packer. Point it at your entrypoints and it automatically follows the import graph for LLMs.",
     "keywords": [
         "llm",

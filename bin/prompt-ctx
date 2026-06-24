@@ -3,7 +3,7 @@ import path from "path";
 import { readFileSync, existsSync, statSync } from "fs";
 import { Glob, type BunFile } from "bun";
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 
 // O(1) Lookups
 const KNOWN_TEXT = new Set([
