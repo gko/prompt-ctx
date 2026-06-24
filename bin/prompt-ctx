@@ -174,6 +174,9 @@ const tsConfigCache = new Map<
     Promise<{ paths: TsConfigPaths; absoluteBaseUrl: string }>
 >();
 
+const discoveredCssFiles = new Set<string>();
+const discoveredAssets = new Set<string>();
+
 function findNearestTsConfig(startDir: string): string | null {
     let currentDir = path.resolve(startDir);
 
@@ -271,6 +274,8 @@ const enhancedResolverPlugin = {
     name: "enhanced-resolver",
     setup(build: any) {
         build.onResolve({ filter: /.*/ }, async (args: any) => {
+            const isCssFile = /\.(css|scss|sass|less|styl)$/i.test(args.path);
+
             if (!args.path.includes("/") && !args.path.startsWith(".")) {
                 return;
             }
@@ -279,50 +284,86 @@ const enhancedResolverPlugin = {
                 ? path.dirname(args.importer)
                 : process.cwd();
 
-            // 1. Resolve tsconfig aliases (highest priority)
-            const tsResolved = await resolveTsConfigAlias(args.path, startDir);
-            if (tsResolved) {
-                return { path: tsResolved };
+            const handleResolved = (resolvedFullPath: string) => {
+                if (/\.(css|scss|sass|less|styl)$/i.test(resolvedFullPath)) {
+                    discoveredCssFiles.add(normalizePath(resolvedFullPath));
+                    return { path: resolvedFullPath, namespace: "ignore" };
+                }
+                return { path: resolvedFullPath };
+            };
+
+            // 1. Root-anchored imports (highest priority)
+            if (args.path.startsWith("/")) {
+                const relativePath = args.path.slice(1);
+                const absolute = path.resolve(process.cwd(), relativePath);
+                const found = resolveExtensionCandidate(absolute);
+                if (found) return handleResolved(found);
             }
 
-            // 2. Dynamic import handling (React.lazy, await import(), code splitting)
+            // 2. tsconfig aliases
+            const tsResolved = await resolveTsConfigAlias(args.path, startDir);
+            if (tsResolved) return handleResolved(tsResolved);
+
+            // 3. Stylesheet Interceptor
+            if (isCssFile) {
+                let resolvedCss: string | null = null;
+                if (args.path.startsWith(".")) {
+                    resolvedCss = path.resolve(startDir, args.path);
+                } else if (path.isAbsolute(args.path)) {
+                    resolvedCss = args.path;
+                }
+                if (resolvedCss && existsSync(resolvedCss)) {
+                    return handleResolved(resolvedCss);
+                }
+            }
+
+            // 4. Non-text asset interception
+            const ext = path.extname(args.path).toLowerCase();
+            if (ext !== "" && !KNOWN_TEXT.has(ext)) {
+                let resolvedAsset: string | null = null;
+                if (args.path.startsWith(".")) {
+                    resolvedAsset = path.resolve(startDir, args.path);
+                } else if (path.isAbsolute(args.path)) {
+                    resolvedAsset = args.path;
+                }
+                if (resolvedAsset && existsSync(resolvedAsset)) {
+                    discoveredAssets.add(normalizePath(resolvedAsset));
+                    return { path: resolvedAsset, namespace: "ignore" };
+                }
+            }
+
+            // 5. Dynamic imports
             if (args.kind === "dynamic-import") {
                 let resolvedPath: string | null = null;
-
                 if (args.path.startsWith(".")) {
                     resolvedPath = path.resolve(startDir, args.path);
                 } else if (args.path.startsWith("/")) {
-                    resolvedPath = path.join(process.cwd(), args.path);
+                    resolvedPath = path.resolve(
+                        process.cwd(),
+                        args.path.slice(1),
+                    );
                 }
-
                 if (resolvedPath) {
                     const found = resolveExtensionCandidate(resolvedPath);
-                    if (found) return { path: found };
+                    if (found) return handleResolved(found);
                 }
             }
 
-            // 3. Existing Vite-style absolute path handling
+            // 6. Vite-style absolute paths
             if (
                 path.isAbsolute(args.path) &&
                 args.path.startsWith(process.cwd())
             ) {
-                if (existsSync(args.path)) return { path: args.path };
+                if (existsSync(args.path)) return handleResolved(args.path);
 
                 const relative = path.relative(process.cwd(), args.path);
                 const publicPath = path.join(process.cwd(), "public", relative);
-                if (existsSync(publicPath)) return { path: publicPath };
+                if (existsSync(publicPath)) return handleResolved(publicPath);
 
                 const assetsPath = path.join(process.cwd(), "assets", relative);
-                if (existsSync(assetsPath)) return { path: assetsPath };
+                if (existsSync(assetsPath)) return handleResolved(assetsPath);
 
                 return { path: args.path, namespace: "ignore" };
-            }
-
-            // 4. Static absolute root imports (e.g. import X from "/src/components/Header")
-            if (args.path.startsWith("/")) {
-                const absolute = path.join(process.cwd(), args.path);
-                const found = resolveExtensionCandidate(absolute);
-                if (found) return { path: found };
             }
 
             return;
@@ -594,9 +635,14 @@ async function assembleLlmContext(
     baseExcludes: string[],
     outputFile: string,
 ) {
-    try {
-        let inputs = new Set<string>();
+    // 1. Explicitly flush global singletons to guarantee pristine state across programmatic, in-process runs
+    discoveredCssFiles.clear();
+    discoveredAssets.clear();
 
+    // Single Source of Truth locked with 'const'
+    const inputs = new Set<string>();
+
+    try {
         // Normalize CLI exclusions using Gitignore-style glob expansion
         const normalizedBaseExcludes = baseExcludes.map((pattern) => {
             if (
@@ -630,21 +676,23 @@ async function assembleLlmContext(
                 const relPattern = path
                     .relative(baseDir, pattern)
                     .replace(/\\/g, "/");
+
                 const glob = new Glob(relPattern);
-                // Important: Bun's glob matching logic needs the results mapped correctly
                 for (const file of glob.scanSync(baseDir)) {
                     inputs.add(normalizePath(path.join(baseDir, file)));
                 }
             } else {
                 try {
                     const stat = statSync(pattern);
+
                     if (stat.isDirectory()) {
                         const glob = new Glob("**/*");
+
                         for (const file of glob.scanSync(pattern)) {
                             const fullPath = normalizePath(
                                 path.join(pattern, file),
                             );
-                            // Gatekeeper: Never let node_modules or excluded files enter the Set!
+
                             if (!isExcluded(fullPath, globalExcludes)) {
                                 inputs.add(fullPath);
                             }
@@ -677,47 +725,56 @@ async function assembleLlmContext(
 
         // 3. Identify entrypoints safe for Bun.build mapping
         const buildableExts = new Set([".js", ".jsx", ".ts", ".tsx", ".html"]);
+
         const entrypoints = Array.from(inputs).filter((f) =>
             buildableExts.has(path.extname(f).toLowerCase()),
         );
 
         // 4. Let Bun trace the AST dependency tree for code files
         if (entrypoints.length > 0) {
+            let result;
+
             try {
-                const result = await Bun.build({
+                result = await Bun.build({
                     entrypoints: entrypoints,
                     target: "bun",
                     packages: "external",
                     metafile: true,
                     plugins: [enhancedResolverPlugin],
+                    logLevel: "error",
                 });
-
-                if (result.success && result.metafile) {
-                    const metaStr = result.metafile;
-                    const meta =
-                        typeof metaStr === "string"
-                            ? JSON.parse(metaStr)
-                            : metaStr;
-
-                    Object.keys(meta.inputs || {}).forEach((f) => {
-                        const normPath = normalizePath(f);
-                        if (!isExcluded(normPath, globalExcludes))
-                            inputs.add(normPath);
-                    });
-                } else if (!result.success) {
-                    console.warn(
-                        "⚠️ Bun had issues tracing some AST dependencies:",
-                        result.logs,
-                    );
-                }
             } catch (buildError: any) {
                 console.warn(
-                    `⚠️ AST Tracing failed: ${buildError.message || "Bundle failed"}. Proceeding with matched files only.`,
+                    `⚠️ Bun.build threw an error during tracing: ${buildError.message}. Proceeding with what we have.`,
+                );
+
+                result = { success: false, metafile: null, logs: [] };
+            }
+
+            // Use metafile if it exists, even if the build "failed"
+            if (result?.metafile) {
+                const meta =
+                    typeof result.metafile === "string"
+                        ? JSON.parse(result.metafile)
+                        : result.metafile;
+
+                Object.keys(meta.inputs || {}).forEach((f) => {
+                    const normPath = normalizePath(f);
+                    if (!isExcluded(normPath, globalExcludes)) {
+                        inputs.add(normPath);
+                    }
+                });
+            }
+
+            if (!result?.success) {
+                console.warn(
+                    "⚠️ Bun encountered issues while tracing (some CSS or syntax errors may have occurred). Continuing...",
                 );
             }
 
             // 4.5. TS Type Crawling (recover ghosted .d.ts files from imports)
             const typeableExts = new Set([".ts", ".tsx", ".vue"]);
+
             const tsFiles = Array.from(inputs).filter((f) =>
                 typeableExts.has(path.extname(f).toLowerCase()),
             );
@@ -733,10 +790,22 @@ async function assembleLlmContext(
                     if (!isExcluded(dep, globalExcludes)) inputs.add(dep);
                 });
             }
+
+            // Inject rescued CSS files into the main graph
+            discoveredCssFiles.forEach((cssPath) => {
+                if (!isExcluded(cssPath, globalExcludes)) inputs.add(cssPath);
+            });
+
+            // Inject rescued static assets (png, woff2, etc.) into the main graph
+            discoveredAssets.forEach((assetPath) => {
+                if (!isExcluded(assetPath, globalExcludes))
+                    inputs.add(assetPath);
+            });
         }
 
         // 5. CSS Scan
         const initialFiles = Array.from(inputs);
+
         const globalCssVisited = new Set<string>();
         for (const file of initialFiles) {
             if (file.endsWith(".css")) {
@@ -745,6 +814,7 @@ async function assembleLlmContext(
                     globalExcludes,
                     globalCssVisited,
                 );
+
                 cssDeps.forEach((dep) => {
                     if (!isExcluded(dep, globalExcludes)) inputs.add(dep);
                 });
@@ -758,16 +828,19 @@ async function assembleLlmContext(
 
         // 7. Read and append files safely via streaming
         const tmpOutputFile = outputFile + ".tmp";
+
         const writer = Bun.file(tmpOutputFile).writer();
         const hasher = new Bun.CryptoHasher("sha256");
 
         try {
             const fileHeader = `// Context Assembled via AST/Glob Trace\n\n`;
+
             writer.write(fileHeader);
             hasher.update(fileHeader);
 
             for (const filePath of sortedInputs) {
                 const file = Bun.file(filePath);
+
                 if (await file.exists()) {
                     const basename = path.basename(filePath);
 
@@ -780,18 +853,22 @@ async function assembleLlmContext(
 
                     if (isTextFile) {
                         writer.write(header);
+
                         hasher.update(header);
 
                         // True O(1) Memory Streaming
                         for await (const chunk of file.stream()) {
                             writer.write(chunk);
+
                             hasher.update(chunk);
                         }
 
                         writer.write("\n\n");
+
                         hasher.update("\n\n");
                     } else {
                         header += `// [BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]\n\n`;
+
                         writer.write(header);
                         hasher.update(header);
                     }
@@ -807,6 +884,7 @@ async function assembleLlmContext(
 
         // 9. Inject SHA into filename
         const extIndex = outputFile.lastIndexOf(".");
+
         const finalOutputFile =
             extIndex !== -1
                 ? `${outputFile.substring(0, extIndex)}-${shortSha}${outputFile.substring(extIndex)}`

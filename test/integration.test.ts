@@ -1089,3 +1089,73 @@ test("Dynamic imports: correctly resolves relative extensionless imports used in
     expect(content).toContain("File: src/modals/AuthModal.tsx");
     expect(content).toContain("export default function AuthModal()");
 });
+
+test("CSS Modules: safely stubs out advanced syntax like :global() without crashing AST trace", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/components"), { recursive: true });
+
+    // 1. A stylesheet with advanced syntax that causes native parser errors
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/components/Button.module.css"),
+        ":global(.dark-mode) .btn { color: white; }\n.btn { background: red; }",
+    );
+
+    // 2. A component importing the CSS Module
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/components/Button.tsx"),
+        "import styles from './Button.module.css';\nexport const Button = () => <button className={styles.btn}>Click</button>;",
+    );
+
+    const { exitCode } = await runCli([
+        "src/components/Button.tsx",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).not.toBeNull();
+    expect(content).toContain("File: src/components/Button.module.css");
+    expect(content).toContain(":global(.dark-mode)");
+});
+
+test("Asset Interceptor: safely registers imported binaries (png, woff2) as omitted text without crashing AST tracer", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/assets"), { recursive: true });
+
+    // 1. Create a dummy PNG and a dummy Font file
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/assets/icon.png"),
+        "fake_png_bytes",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/assets/font.woff2"),
+        "fake_font_bytes",
+    );
+
+    // 2. Import them inside a TypeScript component
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/Banner.tsx"),
+        `
+        import icon from './assets/icon.png';
+        import font from './assets/font.woff2';
+        export const Banner = () => <img src={icon} style={{ fontFamily: font }} />;
+        `,
+    );
+
+    const { exitCode } = await runCli([
+        "src/Banner.tsx",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).not.toBeNull();
+
+    // Prove the component was traced
+    expect(content).toContain("export const Banner");
+
+    // Prove BOTH assets were detected in the AST graph and safely omitted
+    expect(content).toContain("File: src/assets/icon.png");
+    expect(content).toContain("File: src/assets/font.woff2");
+    expect(content).toContain("[BINARY, EXCLUDED, OR NON-TEXT FILE OMITTED]");
+});
