@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import path from "path";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 import { Glob, type BunFile } from "bun";
 
 const VERSION = "0.2.2";
@@ -130,6 +130,36 @@ async function checkIsTextFile(
     }
 }
 
+// Single source of truth for resolving files + directory indexes
+function resolveExtensionCandidate(fullPath: string): string | null {
+    const candidates = [
+        fullPath,
+        `${fullPath}.ts`,
+        `${fullPath}.tsx`,
+        `${fullPath}.js`,
+        `${fullPath}.jsx`,
+        `${fullPath}.vue`,
+        `${fullPath}.svelte`,
+        path.join(fullPath, "index.ts"),
+        path.join(fullPath, "index.tsx"),
+        path.join(fullPath, "index.js"),
+        path.join(fullPath, "index.jsx"),
+        path.join(fullPath, "index.vue"),
+        path.join(fullPath, "index.svelte"),
+    ];
+
+    for (const candidate of candidates) {
+        try {
+            if (statSync(candidate).isFile()) {
+                return candidate;
+            }
+        } catch {
+            continue;
+        }
+    }
+    return null;
+}
+
 // --- PATH NORMALIZER ---
 function normalizePath(p: string) {
     const absolute = path.resolve(p);
@@ -222,32 +252,14 @@ async function resolveTsConfigAlias(
         if (!match) continue;
 
         const wildcardValue = match[1] || "";
+        const normalizedTargets = Array.isArray(targets) ? targets : [targets];
 
-        for (const target of targets) {
+        for (const target of normalizedTargets) {
             const resolvedTarget = target.replace("*", wildcardValue);
             const fullPath = path.resolve(absoluteBaseUrl, resolvedTarget);
 
-            const candidates = [
-                fullPath,
-                `${fullPath}.ts`,
-                `${fullPath}.tsx`,
-                `${fullPath}.js`,
-                `${fullPath}.jsx`,
-                `${fullPath}.vue`,
-                `${fullPath}.svelte`,
-                path.join(fullPath, "index.ts"),
-                path.join(fullPath, "index.tsx"),
-                path.join(fullPath, "index.js"),
-                path.join(fullPath, "index.jsx"),
-                path.join(fullPath, "index.vue"),
-                path.join(fullPath, "index.svelte"),
-            ];
-
-            for (const candidate of candidates) {
-                if (existsSync(candidate)) {
-                    return candidate;
-                }
-            }
+            const found = resolveExtensionCandidate(fullPath);
+            if (found) return found;
         }
     }
 
@@ -263,18 +275,33 @@ const enhancedResolverPlugin = {
                 return;
             }
 
-            // Use importer for correct monorepo behavior
             const startDir = args.importer
                 ? path.dirname(args.importer)
                 : process.cwd();
 
-            // 1. Resolve via tsconfig paths (now correct + cached properly)
+            // 1. Resolve tsconfig aliases (highest priority)
             const tsResolved = await resolveTsConfigAlias(args.path, startDir);
             if (tsResolved) {
                 return { path: tsResolved };
             }
 
-            // 2. Preserve original Vite-style absolute path logic
+            // 2. Dynamic import handling (React.lazy, await import(), code splitting)
+            if (args.kind === "dynamic-import") {
+                let resolvedPath: string | null = null;
+
+                if (args.path.startsWith(".")) {
+                    resolvedPath = path.resolve(startDir, args.path);
+                } else if (args.path.startsWith("/")) {
+                    resolvedPath = path.join(process.cwd(), args.path);
+                }
+
+                if (resolvedPath) {
+                    const found = resolveExtensionCandidate(resolvedPath);
+                    if (found) return { path: found };
+                }
+            }
+
+            // 3. Existing Vite-style absolute path handling
             if (
                 path.isAbsolute(args.path) &&
                 args.path.startsWith(process.cwd())
@@ -291,9 +318,11 @@ const enhancedResolverPlugin = {
                 return { path: args.path, namespace: "ignore" };
             }
 
+            // 4. Static absolute root imports (e.g. import X from "/src/components/Header")
             if (args.path.startsWith("/")) {
                 const absolute = path.join(process.cwd(), args.path);
-                if (existsSync(absolute)) return { path: absolute };
+                const found = resolveExtensionCandidate(absolute);
+                if (found) return { path: found };
             }
 
             return;

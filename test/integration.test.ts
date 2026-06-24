@@ -1057,3 +1057,35 @@ test("Monorepo cache isolation: handles distinct workspace tsconfigs across mult
     expect(content).toContain("File: packages/backend/src/services/auth.ts");
     expect(content).toContain("BACKEND_AUTH");
 });
+
+test("Dynamic imports: correctly resolves relative extensionless imports used in React.lazy", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/modals"), { recursive: true });
+
+    // 1. The lazily loaded component (extensionless target)
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/modals/AuthModal.tsx"),
+        "export default function AuthModal() { return <div>Login</div>; }",
+    );
+
+    // 2. The entrypoint utilizing React.lazy / dynamic import()
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/App.tsx"),
+        `
+        import React, { Suspense } from 'react';
+        const AuthModal = React.lazy(() => import('./modals/AuthModal'));
+
+        export function App() {
+            return <Suspense><AuthModal /></Suspense>;
+        }
+        console.log(App);
+        `,
+    );
+
+    const { exitCode } = await runCli(["src/App.tsx", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).not.toBeNull();
+    expect(content).toContain("File: src/modals/AuthModal.tsx");
+    expect(content).toContain("export default function AuthModal()");
+});
