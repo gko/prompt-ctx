@@ -705,10 +705,6 @@ test("Level 6000: Monorepo deep exclusions strictly override higher whitelists",
     expect(content).not.toContain("File: packages/api/dist/bundle.js");
 });
 
-// ==========================================
-// NEW TESTS FOR RECENT FIXES
-// ==========================================
-
 test("Self-exclusion works when output is in a subdirectory", async () => {
     await mkdir(path.join(FIXTURES_DIR, "dist"), { recursive: true });
     await writeFile(
@@ -750,4 +746,314 @@ test("gitignore rules work correctly with folder/* pattern", async () => {
     const content = await getOutputContent();
     expect(content).not.toContain("File: src/main.ts");
     expect(content).not.toContain("File: src/test.ts");
+});
+
+// ==========================================
+// TSConfig Path Alias Tests
+// ==========================================
+
+test("tsconfig paths: resolves basic @/ alias", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/utils"), { recursive: true });
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: ".",
+                paths: {
+                    "@/*": ["src/*"],
+                },
+            },
+        }),
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/utils/helper.ts"),
+        "export const helper = 'from alias';",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.ts"),
+        `import { helper } from '@/utils/helper';\nconsole.log(helper);`,
+    );
+
+    const { exitCode } = await runCli(["index.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("File: src/utils/helper.ts");
+    expect(content).toContain("export const helper = 'from alias';");
+});
+
+test("tsconfig paths: prefers more specific alias over general one", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src"), { recursive: true });
+    await mkdir(path.join(FIXTURES_DIR, "src/ui/components"), {
+        recursive: true,
+    });
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: ".",
+                paths: {
+                    "@/*": ["src/*"],
+                    "@/components/*": ["src/ui/components/*"],
+                },
+            },
+        }),
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/ui/components/Button.tsx"),
+        "export const Button = 'specific';",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/something.ts"),
+        "export const something = 'general';",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.ts"),
+        `
+            import { Button } from '@/components/Button';
+            import { something } from '@/something';
+            console.log(Button, something);
+        `,
+    );
+
+    const { exitCode } = await runCli(["index.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("File: src/ui/components/Button.tsx");
+    expect(content).toContain("specific");
+    expect(content).toContain("File: src/something.ts");
+});
+
+test("tsconfig paths: resolves .vue and .svelte files via alias", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/components"), { recursive: true });
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: ".",
+                paths: { "@/*": ["src/*"] },
+            },
+        }),
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/components/Card.vue"),
+        "<template><div>Card</div></template>",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/components/Modal.svelte"),
+        "<script>export let open = false;</script>",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.ts"),
+        `
+            import Card from '@/components/Card.vue';
+            import Modal from '@/components/Modal.svelte';
+            console.log(Card, Modal);
+        `,
+    );
+
+    const { exitCode } = await runCli(["index.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("File: src/components/Card.vue");
+    expect(content).toContain("File: src/components/Modal.svelte");
+});
+
+test("tsconfig paths: works with dynamic imports", async () => {
+    await mkdir(path.join(FIXTURES_DIR, "src/features"), { recursive: true });
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: ".",
+                paths: { "@/*": ["src/*"] },
+            },
+        }),
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "src/features/lazy.ts"),
+        "export const lazyValue = 'loaded dynamically';",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.ts"),
+        `
+            const mod = await import('@/features/lazy');
+            console.log(mod.lazyValue);
+        `,
+    );
+
+    const { exitCode } = await runCli(["index.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("File: src/features/lazy.ts");
+    expect(content).toContain("loaded dynamically");
+});
+
+test("tsconfig paths: falls back gracefully when alias is not defined", async () => {
+    await writeFile(
+        path.join(FIXTURES_DIR, "tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: ".",
+                paths: {
+                    "@/*": ["src/*"],
+                },
+            },
+        }),
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "normal.ts"),
+        "export const normal = true;",
+    );
+
+    await writeFile(
+        path.join(FIXTURES_DIR, "index.ts"),
+        `import { normal } from './normal';\nconsole.log(normal);`,
+    );
+
+    const { exitCode } = await runCli(["index.ts", "--out", "output.txt"]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).toContain("File: normal.ts");
+});
+
+test("Monorepo alias resolution: correctly isolates nested workspace tsconfig and baseUrl offset", async () => {
+    // 1. Root tsconfig (must be strictly ignored by workspace files)
+    await writeFile(
+        path.join(FIXTURES_DIR, "tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: ".",
+                paths: {
+                    "@/ui/*": ["root-ui/*"],
+                },
+            },
+        }),
+    );
+    await mkdir(path.join(FIXTURES_DIR, "root-ui"), { recursive: true });
+    await writeFile(
+        path.join(FIXTURES_DIR, "root-ui/Button.ts"),
+        "export const Button = 'POISONED_ROOT_BUTTON';",
+    );
+
+    // 2. Nested Workspace Package (apps/web)
+    await mkdir(path.join(FIXTURES_DIR, "apps/web/src/components"), {
+        recursive: true,
+    });
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/web/tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: "./src",
+                paths: {
+                    "@/ui/*": ["components/*"],
+                },
+            },
+        }),
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/web/src/components/Button.ts"),
+        "export const Button = 'CORRECT_WORKSPACE_BUTTON';",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/web/src/index.ts"),
+        "import { Button } from '@/ui/Button';\nconsole.log(Button);",
+    );
+
+    // Invoke CLI from the monorepo root pointing into the workspace app
+    const { exitCode } = await runCli([
+        "apps/web/src/index.ts",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).not.toBeNull();
+    expect(content).toContain("File: apps/web/src/components/Button.ts");
+    expect(content).toContain("CORRECT_WORKSPACE_BUTTON");
+    expect(content).not.toContain("POISONED_ROOT_BUTTON");
+});
+
+test("Monorepo cache isolation: handles distinct workspace tsconfigs across multiple entrypoints in a single run", async () => {
+    // Setup App 1 (apps/portal)
+    await mkdir(path.join(FIXTURES_DIR, "apps/portal/src/utils"), {
+        recursive: true,
+    });
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/portal/tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: "./src",
+                paths: { "@/*": ["utils/*"] },
+            },
+        }),
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/portal/src/utils/logger.ts"),
+        "export const portalLogger = 'PORTAL_LOG';",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "apps/portal/src/main.ts"),
+        "import { portalLogger } from '@/logger'; console.log(portalLogger);",
+    );
+
+    // Setup App 2 (packages/backend)
+    await mkdir(path.join(FIXTURES_DIR, "packages/backend/src/services"), {
+        recursive: true,
+    });
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/backend/tsconfig.json"),
+        JSON.stringify({
+            compilerOptions: {
+                baseUrl: "./src",
+                paths: { "@/*": ["services/*"] },
+            },
+        }),
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/backend/src/services/auth.ts"),
+        "export const backendAuth = 'BACKEND_AUTH';",
+    );
+    await writeFile(
+        path.join(FIXTURES_DIR, "packages/backend/src/main.ts"),
+        "import { backendAuth } from '@/auth'; console.log(backendAuth);",
+    );
+
+    // Pass both workspace entrypoints simultaneously
+    const { exitCode } = await runCli([
+        "apps/portal/src/main.ts",
+        "packages/backend/src/main.ts",
+        "--out",
+        "output.txt",
+    ]);
+    expect(exitCode).toBe(0);
+
+    const content = await getOutputContent();
+    expect(content).not.toBeNull();
+
+    // Verify both packages resolved their specific @/ aliases independently
+    expect(content).toContain("File: apps/portal/src/utils/logger.ts");
+    expect(content).toContain("PORTAL_LOG");
+    expect(content).toContain("File: packages/backend/src/services/auth.ts");
+    expect(content).toContain("BACKEND_AUTH");
 });

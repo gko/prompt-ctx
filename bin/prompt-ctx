@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import path from "path";
+import { readFileSync, existsSync } from "fs";
 import { Glob, type BunFile } from "bun";
 
 const VERSION = "0.2.1";
@@ -136,39 +137,171 @@ function normalizePath(p: string) {
     return rel.replace(/\\/g, "/");
 }
 
-// --- VITE PATH RESOLVER PLUGIN ---
-const viteResolverPlugin = {
-    name: "vite-resolver",
+type TsConfigPaths = Record<string, string[]>;
+
+const tsConfigCache = new Map<
+    string,
+    Promise<{ paths: TsConfigPaths; absoluteBaseUrl: string }>
+>();
+
+function findNearestTsConfig(startDir: string): string | null {
+    let currentDir = path.resolve(startDir);
+
+    while (true) {
+        for (const filename of ["tsconfig.json", "jsconfig.json"]) {
+            const configPath = path.join(currentDir, filename);
+            if (existsSync(configPath)) {
+                return configPath;
+            }
+        }
+        const parentDir = path.dirname(currentDir);
+        if (parentDir === currentDir) break;
+        currentDir = parentDir;
+    }
+    return null;
+}
+
+async function loadTsConfigPaths(
+    startDir: string = process.cwd(),
+): Promise<{ paths: TsConfigPaths; absoluteBaseUrl: string }> {
+    const configPath = findNearestTsConfig(startDir);
+
+    if (!configPath) {
+        return { paths: {}, absoluteBaseUrl: process.cwd() };
+    }
+
+    // Cache by the actual tsconfig path (prevents duplicate I/O)
+    if (tsConfigCache.has(configPath)) {
+        return tsConfigCache.get(configPath)!;
+    }
+
+    const promise = (async () => {
+        try {
+            const config = (await Bun.file(configPath).json()) as any;
+            const compilerOptions = config.compilerOptions || {};
+            const rawBaseUrl = compilerOptions.baseUrl || ".";
+
+            return {
+                paths: compilerOptions.paths || {},
+                // Correctly resolve baseUrl relative to the tsconfig location
+                absoluteBaseUrl: path.resolve(
+                    path.dirname(configPath),
+                    rawBaseUrl,
+                ),
+            };
+        } catch {
+            return {
+                paths: {},
+                absoluteBaseUrl: path.dirname(configPath),
+            };
+        }
+    })();
+
+    tsConfigCache.set(configPath, promise);
+    return promise;
+}
+
+async function resolveTsConfigAlias(
+    importPath: string,
+    startDir: string,
+): Promise<string | null> {
+    const { paths, absoluteBaseUrl } = await loadTsConfigPaths(startDir);
+    if (Object.keys(paths).length === 0) return null;
+
+    const sortedAliases = Object.entries(paths).sort(
+        ([a], [b]) => b.length - a.length,
+    );
+
+    for (const [alias, targets] of sortedAliases) {
+        const aliasPattern = alias.replace(/\*/g, "(.*)");
+        const regex = new RegExp(
+            `^${aliasPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        );
+
+        const match = importPath.match(regex);
+        if (!match) continue;
+
+        const wildcardValue = match[1] || "";
+
+        for (const target of targets) {
+            const resolvedTarget = target.replace("*", wildcardValue);
+            const fullPath = path.resolve(absoluteBaseUrl, resolvedTarget);
+
+            const candidates = [
+                fullPath,
+                `${fullPath}.ts`,
+                `${fullPath}.tsx`,
+                `${fullPath}.js`,
+                `${fullPath}.jsx`,
+                `${fullPath}.vue`,
+                `${fullPath}.svelte`,
+                path.join(fullPath, "index.ts"),
+                path.join(fullPath, "index.tsx"),
+                path.join(fullPath, "index.js"),
+                path.join(fullPath, "index.jsx"),
+                path.join(fullPath, "index.vue"),
+                path.join(fullPath, "index.svelte"),
+            ];
+
+            for (const candidate of candidates) {
+                if (existsSync(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+// --- MAIN PLUGIN ---
+const enhancedResolverPlugin = {
+    name: "enhanced-resolver",
     setup(build: any) {
-        build.onResolve({ filter: /.*/ }, (args: any) => {
+        build.onResolve({ filter: /.*/ }, async (args: any) => {
+            if (!args.path.includes("/") && !args.path.startsWith(".")) {
+                return;
+            }
+
+            // Use importer for correct monorepo behavior
+            const startDir = args.importer
+                ? path.dirname(args.importer)
+                : process.cwd();
+
+            // 1. Resolve via tsconfig paths (now correct + cached properly)
+            const tsResolved = await resolveTsConfigAlias(args.path, startDir);
+            if (tsResolved) {
+                return { path: tsResolved };
+            }
+
+            // 2. Preserve original Vite-style absolute path logic
             if (
                 path.isAbsolute(args.path) &&
                 args.path.startsWith(process.cwd())
             ) {
-                if (existsSync(args.path)) return;
+                if (existsSync(args.path)) return { path: args.path };
 
-                const relativeToCwd = path.relative(process.cwd(), args.path);
-                const publicPath = path.join(
-                    process.cwd(),
-                    "public",
-                    relativeToCwd,
-                );
+                const relative = path.relative(process.cwd(), args.path);
+                const publicPath = path.join(process.cwd(), "public", relative);
                 if (existsSync(publicPath)) return { path: publicPath };
 
-                const assetsPath = path.join(
-                    process.cwd(),
-                    "assets",
-                    relativeToCwd,
-                );
+                const assetsPath = path.join(process.cwd(), "assets", relative);
                 if (existsSync(assetsPath)) return { path: assetsPath };
 
                 return { path: args.path, namespace: "ignore" };
             }
+
+            if (args.path.startsWith("/")) {
+                const absolute = path.join(process.cwd(), args.path);
+                if (existsSync(absolute)) return { path: absolute };
+            }
+
+            return;
         });
 
-        build.onLoad({ filter: /.*/, namespace: "ignore" }, () => {
-            return { contents: "" };
-        });
+        build.onLoad({ filter: /.*/, namespace: "ignore" }, () => ({
+            contents: "",
+        }));
     },
 };
 
@@ -527,7 +660,7 @@ async function assembleLlmContext(
                     target: "bun",
                     packages: "external",
                     metafile: true,
-                    plugins: [viteResolverPlugin],
+                    plugins: [enhancedResolverPlugin],
                 });
 
                 if (result.success && result.metafile) {
