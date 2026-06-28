@@ -21,37 +21,7 @@ It does this instantly, natively, and with zero external dependencies.
 
 ## How it works
 
-```mermaid
-flowchart TD
-    classDef default fill:#fff,stroke:#cbd5e1,stroke-width:1.5px,color:#334155,rx:8,ry:8
-    classDef cli fill:#0f172a,stroke:#0f172a,stroke-width:2px,color:#f8fafc,rx:6,ry:6,white-space:nowrap
-    classDef danger fill:#fef2f2,stroke:#ef4444,stroke-width:1.5px,color:#991b1b,stroke-dasharray: 4 4
-    classDef engine fill:#f8fafc,stroke:#64748b,stroke-width:2px,color:#0f172a
-    classDef final fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46,rx:8,ry:8,white-space:nowrap
-
-    %% Stacked Bash syntax cuts the box width by 45%, making clipping impossible
-    CLI["<b>bunx prompt-ctx</b> index.html README.md --exclude js/secret.js"]:::cli
-
-    CLI --> HTML["index.html"]
-    CLI --> MD["README.md"]
-
-    subgraph Graph ["AST & CSS Recursive Import Tracing"]
-        HTML -->|"src"| TSX["main.tsx"]
-        HTML -->|"link"| CSS["index.css"]
-
-        TSX -->|"import"| APP["components/App.tsx"]
-        TSX -.->|"matches --exclude"| SEC["js/secret.js"]:::danger
-
-        CSS -->|"@import"| RST["reset.css"]
-    end
-    %% Overrides the default pale yellow with a clean, high-tech dotted slate
-    style Graph fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,stroke-dasharray: 4 4,color:#334155
-
-    %% Swapped from a stadium pill to a Subroutine box to prevent sloped-wall text collisions
-    APP & RST & MD ==> Engine[["⚙️ AST-Aware Merge<br/>& Deduplication"]]:::engine
-
-    Engine ==> Out["📄 llm-context-a8ce122d.txt"]:::final
-```
+![How prompt-ctx works](/docs/diagram.png)
 
 ## Why this instead of Repomix / Yek / Gitingest?
 
